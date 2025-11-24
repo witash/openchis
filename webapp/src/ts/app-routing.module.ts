@@ -9,6 +9,7 @@ import { routes as errorRoutes } from '@mm-modules/error/error.routes';
 import { routes as reportRoutes } from '@mm-modules/reports/reports.routes';
 import { routes as messagesRoutes } from '@mm-modules/messages/messages.routes';
 import { routes as contactsRoutes } from '@mm-modules/contacts/contacts.routes';
+import { routes as fhirContactsRoutes } from '@mm-modules/fhir-contacts/fhir-contacts.routes';
 import { routes as privacyPolicyRoutes } from '@mm-modules/privacy-policy/privacy-policy.routes';
 import { routes as tasksRoutes } from '@mm-modules/tasks/tasks.routes';
 import { routes as trainingRoutes } from '@mm-modules/trainings/trainings.routes';
@@ -22,6 +23,7 @@ const routes: Routes = [
   ...reportRoutes,
   ...messagesRoutes,
   ...contactsRoutes,
+  ...fhirContactsRoutes,
   ...privacyPolicyRoutes,
   ...tasksRoutes,
   ...trainingRoutes,

@@ -1,0 +1,89 @@
+<div class="fhir-contacts-page">
+  <div class="page-header">
+    <h1>FHIR Contacts</h1>
+    <button class="btn btn-primary" (click)="refresh()" [disabled]="loading">
+      <i class="fa fa-sync"></i> Refresh
+    </button>
+  </div>
+
+  <div *ngIf="loading" class="loading-indicator">
+    <i class="fa fa-spinner fa-spin"></i> Loading contacts...
+  </div>
+
+  <div *ngIf="error" class="alert alert-danger">
+    <i class="fa fa-exclamation-triangle"></i> {{ error }}
+  </div>
+
+  <div *ngIf="!loading && !error" class="contacts-container">
+
+    <!-- Locations Section -->
+    <div class="contacts-section">
+      <h2>
+        <i class="fa fa-map-marker-alt"></i>
+        Locations ({{ locations.length }})
+      </h2>
+
+      <div *ngIf="locations.length === 0" class="empty-state">
+        No locations found
+      </div>
+
+      <ul class="contact-list" *ngIf="locations.length > 0">
+        <li *ngFor="let location of locations" class="contact-item">
+          <a [routerLink]="['/fhir-contacts', location.id]" class="contact-link">
+            <div class="contact-icon">
+              <i class="fa" [ngClass]="getLocationIcon(location)"></i>
+            </div>
+            <div class="contact-details">
+              <h3 class="contact-name">{{ getLocationName(location) }}</h3>
+              <p class="contact-type">{{ getLocationTypeName(location) }}</p>
+              <p class="contact-id">ID: {{ location.id }}</p>
+            </div>
+          </a>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Patients Section -->
+    <div class="contacts-section">
+      <h2>
+        <i class="fa fa-user"></i>
+        Patients ({{ patients.length }})
+      </h2>
+
+      <div *ngIf="patients.length === 0" class="empty-state">
+        No patients found
+      </div>
+
+      <ul class="contact-list" *ngIf="patients.length > 0">
+        <li *ngFor="let patient of patients" class="contact-item">
+          <a [routerLink]="['/fhir-contacts', patient.id]" class="contact-link">
+            <div class="contact-icon">
+              <i class="fa" [ngClass]="getPatientIcon()"></i>
+            </div>
+            <div class="contact-details">
+              <h3 class="contact-name">
+                {{ getPatientName(patient) }}
+                <span *ngIf="getPatientNickname(patient)" class="nickname">
+                  ({{ getPatientNickname(patient) }})
+                </span>
+              </h3>
+              <div class="contact-info">
+                <span *ngIf="getPatientPhone(patient)" class="contact-phone">
+                  <i class="fa fa-phone"></i> {{ getPatientPhone(patient) }}
+                </span>
+                <span *ngIf="getPatientBirthDate(patient)" class="contact-dob">
+                  <i class="fa fa-birthday-cake"></i> {{ getPatientBirthDate(patient) }}
+                </span>
+                <span class="contact-gender">
+                  <i class="fa fa-venus-mars"></i> {{ getPatientGender(patient) }}
+                </span>
+              </div>
+              <p class="contact-id">ID: {{ patient.id }}</p>
+            </div>
+          </a>
+        </li>
+      </ul>
+    </div>
+
+  </div>
+</div>

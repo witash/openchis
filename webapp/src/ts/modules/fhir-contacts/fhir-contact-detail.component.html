@@ -1,0 +1,163 @@
+<div class="fhir-contact-detail-page">
+  <div class="page-header">
+    <a routerLink="/fhir-contacts" class="back-button">
+      <i class="fa fa-arrow-left"></i> Back to Contacts
+    </a>
+  </div>
+
+  <div *ngIf="loading" class="loading-indicator">
+    <i class="fa fa-spinner fa-spin"></i> Loading contact details...
+  </div>
+
+  <div *ngIf="error" class="alert alert-danger">
+    <i class="fa fa-exclamation-triangle"></i> {{ error }}
+  </div>
+
+  <div *ngIf="!loading && !error && resource" class="contact-details-container">
+
+    <!-- Hierarchy Breadcrumb -->
+    <div *ngIf="hierarchy.length > 0" class="hierarchy-breadcrumb">
+      <h3><i class="fa fa-sitemap"></i> Hierarchy</h3>
+      <nav class="breadcrumb-nav">
+        <span *ngFor="let location of hierarchy; let last = last">
+          <a [routerLink]="['/fhir-contacts', location.id]">
+            {{ getLocationName(location) }}
+          </a>
+          <i *ngIf="!last" class="fa fa-chevron-right separator"></i>
+        </span>
+        <span *ngIf="isPatient() && patient">
+          <i class="fa fa-chevron-right separator"></i>
+          <span class="current-patient">{{ getPatientName(patient) }}</span>
+        </span>
+      </nav>
+    </div>
+
+    <!-- Patient Details -->
+    <div *ngIf="isPatient() && patient" class="resource-card patient-card">
+      <div class="card-header">
+        <div class="icon-container patient-icon">
+          <i class="fa fa-user"></i>
+        </div>
+        <div class="header-info">
+          <h2>{{ getPatientName(patient) }}</h2>
+          <p class="resource-type">Patient</p>
+        </div>
+      </div>
+
+      <div class="card-body">
+        <div class="info-grid">
+          <div class="info-item">
+            <label><i class="fa fa-id-card"></i> ID</label>
+            <span class="value">{{ patient.id }}</span>
+          </div>
+
+          <div class="info-item" *ngIf="patient.gender">
+            <label><i class="fa fa-venus-mars"></i> Gender</label>
+            <span class="value">{{ patient.gender }}</span>
+          </div>
+
+          <div class="info-item" *ngIf="patient.birthDate">
+            <label><i class="fa fa-birthday-cake"></i> Birth Date</label>
+            <span class="value">{{ patient.birthDate }}</span>
+          </div>
+
+          <div class="info-item" *ngIf="getPatientPhone(patient)">
+            <label><i class="fa fa-phone"></i> Phone</label>
+            <span class="value">{{ getPatientPhone(patient) }}</span>
+          </div>
+
+          <div class="info-item" *ngIf="patient.active !== undefined">
+            <label><i class="fa fa-check-circle"></i> Active</label>
+            <span class="value">{{ patient.active ? 'Yes' : 'No' }}</span>
+          </div>
+        </div>
+
+        <div *ngIf="patient.identifier && patient.identifier.length > 0" class="identifiers-section">
+          <h4>Identifiers</h4>
+          <ul class="identifier-list">
+            <li *ngFor="let identifier of patient.identifier">
+              <strong>{{ identifier.system }}</strong>: {{ identifier.value }}
+            </li>
+          </ul>
+        </div>
+
+        <div *ngIf="patient.extension && patient.extension.length > 0" class="extensions-section">
+          <h4>Additional Information</h4>
+          <ul class="extension-list">
+            <li *ngFor="let ext of patient.extension">
+              <strong>{{ ext.url }}</strong>:
+              {{ ext.valueString || ext.valueCode || ext.valueDateTime || ext.valueBoolean }}
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Location Details -->
+    <div *ngIf="isLocation() && location" class="resource-card location-card">
+      <div class="card-header">
+        <div class="icon-container location-icon">
+          <i class="fa" [ngClass]="getResourceIcon(location)"></i>
+        </div>
+        <div class="header-info">
+          <h2>{{ getLocationName(location) }}</h2>
+          <p class="resource-type">{{ getLocationTypeName(location) }}</p>
+        </div>
+      </div>
+
+      <div class="card-body">
+        <div class="info-grid">
+          <div class="info-item">
+            <label><i class="fa fa-id-card"></i> ID</label>
+            <span class="value">{{ location.id }}</span>
+          </div>
+
+          <div class="info-item" *ngIf="location.status">
+            <label><i class="fa fa-info-circle"></i> Status</label>
+            <span class="value">{{ location.status }}</span>
+          </div>
+        </div>
+
+        <div *ngIf="getLocationDescription(location)" class="description-section">
+          <h4><i class="fa fa-align-left"></i> Description</h4>
+          <p>{{ getLocationDescription(location) }}</p>
+        </div>
+
+        <div *ngIf="location.identifier && location.identifier.length > 0" class="identifiers-section">
+          <h4>Identifiers</h4>
+          <ul class="identifier-list">
+            <li *ngFor="let identifier of location.identifier">
+              <strong>{{ identifier.system }}</strong>: {{ identifier.value }}
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Children Section -->
+    <div *ngIf="children.length > 0" class="children-section">
+      <h3><i class="fa fa-layer-group"></i> Children ({{ children.length }})</h3>
+
+      <ul class="children-list">
+        <li *ngFor="let child of children" class="child-item">
+          <a [routerLink]="['/fhir-contacts', child.id]" class="child-link">
+            <div class="child-icon">
+              <i class="fa" [ngClass]="getResourceIcon(child)"></i>
+            </div>
+            <div class="child-info">
+              <h4>{{ getResourceName(child) }}</h4>
+              <p class="child-type">{{ getResourceType(child) }}</p>
+            </div>
+          </a>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Raw FHIR Data (for debugging) -->
+    <details class="raw-data-section">
+      <summary><i class="fa fa-code"></i> View Raw FHIR Data</summary>
+      <pre>{{ resource | json }}</pre>
+    </details>
+
+  </div>
+</div>

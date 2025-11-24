@@ -23,6 +23,7 @@
       "@mm-directives/*": ["src/ts/directives/*"],
       "@mm-effects/*": ["src/ts/effects/*"],
       "@mm-environments/*": ["src/ts/environments/*"],
+      "@mm-interfaces/*": ["src/ts/interfaces/*"],
       "@mm-modals/*": ["src/ts/modals/*"],
       "@mm-modules/*": ["src/ts/modules/*"],
       "@mm-pipes/*": ["src/ts/pipes/*"],
