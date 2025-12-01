@@ -285,6 +285,89 @@ if (UNIT_TEST_ENV) {
     }
   };
 
+  // Store attachments in postgres and return doc with stubs
+  const storeAttachments = async (doc, fetchFromCouchDB = true) => {
+    if (!doc._attachments) {
+      return doc;
+    }
+
+    // Check if we need to fetch full attachments from CouchDB
+    const hasStubs = Object.values(doc._attachments).some(att => att.stub === true);
+
+    let fullDoc = doc;
+    if (hasStubs && fetchFromCouchDB) {
+      try {
+        fullDoc = await module.exports.medic.get(doc._id, {
+          rev: doc._rev,
+          attachments: true,
+          binary: false
+        });
+      } catch (err) {
+        logger.error(`Error fetching attachments for ${doc._id}: %o`, err);
+        return doc;
+      }
+    }
+
+    // Store each attachment
+    for (const [name, att] of Object.entries(fullDoc._attachments)) {
+      if (att.data) {
+        try {
+          await postgresPool.query(
+            `INSERT INTO attachments (doc_id, name, content_type, digest, length, revpos, data)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (doc_id, name) DO UPDATE SET content_type = $3, digest = $4, length = $5, revpos = $6, data = $7`,
+            [doc._id, name, att.content_type, att.digest, att.length, att.revpos, att.data]
+          );
+        } catch (err) {
+          logger.error(`Error storing attachment ${name} for ${doc._id}: %o`, err);
+        }
+      }
+    }
+
+    // Return doc with stubs (no data) to store in medic_documents
+    const docWithStubs = { ...fullDoc };
+    if (docWithStubs._attachments) {
+      docWithStubs._attachments = {};
+      for (const [name, att] of Object.entries(fullDoc._attachments)) {
+        docWithStubs._attachments[name] = {
+          content_type: att.content_type,
+          digest: att.digest,
+          length: att.length,
+          revpos: att.revpos,
+          stub: true
+        };
+      }
+    }
+
+    return docWithStubs;
+  };
+
+  // Shared function to save a document to postgres
+  // Used by both the changes listener and bulk-docs endpoint
+  const saveDocToPostgres = async (doc, options = {}) => {
+    const { fetchAttachmentsFromCouchDB = true } = options;
+    const { _id, _rev } = doc;
+
+    // Store attachments separately and get doc with stubs
+    const docWithStubs = await storeAttachments(doc, fetchAttachmentsFromCouchDB);
+
+    const timestamp = Date.now();
+    const docJson = JSON.stringify(docWithStubs);
+    const subject = getSubject(doc);
+
+    await postgresPool.query(
+      'INSERT INTO medic_documents (_id, _rev, timestamp, doc, subject) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (_id, _rev) DO UPDATE SET doc = $4, subject = $5',
+      [_id, _rev, timestamp, docJson, subject]
+    );
+
+    // If this is a contact document, also insert into contacts table
+    await insertContactIfNeeded(doc);
+
+    logger.debug(`Saved document ${_id} rev ${_rev} to postgres`);
+  };
+
+  module.exports.saveDocToPostgres = saveDocToPostgres;
+
   // Changes listener to copy documents from medic database to postgres
   const startChangesListener = () => {
     const feed = module.exports.medic.changes({
@@ -299,20 +382,7 @@ if (UNIT_TEST_ENV) {
           return;
         }
 
-        const { _id, _rev } = change.doc;
-        const timestamp = Date.now();
-        const doc = JSON.stringify(change.doc);
-        const subject = getSubject(change.doc);
-
-        await postgresPool.query(
-          'INSERT INTO medic_documents (_id, _rev, timestamp, doc, subject) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (_id, _rev) DO UPDATE SET doc = $4, subject = $5',
-          [_id, _rev, timestamp, doc, subject]
-        );
-
-        // If this is a contact document, also insert into contacts table
-        await insertContactIfNeeded(change.doc);
-
-        logger.debug(`Copied document ${_id} rev ${_rev} to postgres`);
+        await saveDocToPostgres(change.doc, { fetchAttachmentsFromCouchDB: true });
       } catch (err) {
         logger.error('Error copying document to postgres: %o', err);
       }

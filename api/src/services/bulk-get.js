@@ -23,17 +23,31 @@ const hasAttachmentStubs = (doc) => {
   return Object.values(doc._attachments).some(att => att.stub === true);
 };
 
-// Get full attachments from CouchDB for a document
-const getAttachmentsFromCouchDB = async (id, rev) => {
+// Get full attachments from postgres for a document
+const getAttachmentsFromPostgres = async (docId) => {
   try {
-    const fullDoc = await db.medic.get(id, {
-      rev: rev,
-      attachments: true,
-      binary: false
-    });
-    return fullDoc._attachments;
+    const result = await db.postgres.query(
+      'SELECT name, content_type, digest, length, revpos, data FROM attachments WHERE doc_id = $1',
+      [docId]
+    );
+
+    if (result.rows.length === 0) {
+      return null;
+    }
+
+    const attachments = {};
+    for (const row of result.rows) {
+      attachments[row.name] = {
+        content_type: row.content_type,
+        digest: row.digest,
+        length: row.length,
+        revpos: row.revpos,
+        data: row.data
+      };
+    }
+    return attachments;
   } catch (err) {
-    console.error(`Error fetching attachments from CouchDB for ${id}:`, err);
+    console.error(`Error fetching attachments from postgres for ${docId}:`, err);
     return null;
   }
 };
@@ -74,9 +88,9 @@ const getDocsFromPostgres = async (docs) => {
       if (result.rows.length > 0) {
         const doc = result.rows[0].doc;
 
-        // If document has attachment stubs, fetch full attachments from CouchDB (temporary fix)
+        // If document has attachment stubs, fetch full attachments from postgres
         if (hasAttachmentStubs(doc)) {
-          const attachments = await getAttachmentsFromCouchDB(doc._id, doc._rev);
+          const attachments = await getAttachmentsFromPostgres(doc._id);
           if (attachments) {
             doc._attachments = attachments;
           }

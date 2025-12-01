@@ -64,6 +64,7 @@ module.exports = {
             OR p3.parent = ANY($1)
             OR p4.parent = ANY($1)
             OR md.subject = '_all'
+            OR md.subject IS NULL
           )
         ORDER BY md._id, md.timestamp DESC
       `;
