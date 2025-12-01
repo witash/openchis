@@ -54,14 +54,13 @@ const getMissingDocIdsRevsPairs = async (localDb, remoteDocIdsRevs) => {
 };
 
 const getDownloadList = async (localDb = true) => {
-  const response = await utils.fetchJSON('/api/v1/replication/get-ids');
+  // Use the same endpoint as normal replication, but without since parameter for initial sync
+  const response = await utils.fetchJSON('/api/v1/replication/changes');
 
-  docIdsRevs = await getMissingDocIdsRevsPairs(localDb, response.doc_ids_revs);
-  remoteDocCount = response.doc_ids_revs.length;
+  docIdsRevs = await getMissingDocIdsRevsPairs(localDb, response.changes);
+  remoteDocCount = response.changes.length;
 
-  if (response.warn) {
-    await displayTooManyDocsWarning(response);
-  }
+  // Note: The new endpoint doesn't have warn/limit fields, so we skip the warning display
 };
 
 const getLocalDocList = async (localDb) => {

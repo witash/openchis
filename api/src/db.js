@@ -236,4 +236,95 @@ if (UNIT_TEST_ENV) {
 
   module.exports.addRoleAsAdmin = (dbname, role) => addRoleToSecurity(dbname, role, true);
   module.exports.addRoleAsMember = (dbname, role) => addRoleToSecurity(dbname, role, false);
+
+  // Postgres connection for simulating CouchDB sync
+  const { Pool } = require('pg');
+  const { getSubject } = require('./services/subject-extractor');
+
+  const postgresPool = new Pool({
+    user: 'postgres',
+    password: 'postgres',
+    host: 'localhost',
+    port: 5432,
+    database: 'postgres'
+  });
+
+  module.exports.postgres = postgresPool;
+
+  // Contact types that should be stored in the contacts table
+  const CONTACT_TYPES = ['contact', 'person', 'health_center', 'district_hospital', 'clinic'];
+
+  const isContactType = (doc) => {
+    return doc.type && CONTACT_TYPES.includes(doc.type);
+  };
+
+  const extractParentId = (doc) => {
+    if (!doc.parent) {
+      return null;
+    }
+    // Parent can be either a string (id) or an object with _id
+    return typeof doc.parent === 'string' ? doc.parent : doc.parent._id;
+  };
+
+  const insertContactIfNeeded = async (doc) => {
+    if (!isContactType(doc)) {
+      return;
+    }
+
+    const parentId = extractParentId(doc);
+
+    try {
+      await postgresPool.query(
+        'INSERT INTO contacts (id, type, parent) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET type = $2, parent = $3',
+        [doc._id, doc.type, parentId]
+      );
+      logger.debug(`Inserted contact ${doc._id} (${doc.type}) with parent ${parentId}`);
+    } catch (err) {
+      logger.error(`Error inserting contact ${doc._id}: %o`, err);
+      // Don't fail the whole operation if contact insert fails
+    }
+  };
+
+  // Changes listener to copy documents from medic database to postgres
+  const startChangesListener = () => {
+    const feed = module.exports.medic.changes({
+      since: 0,
+      live: true,
+      include_docs: true
+    });
+
+    feed.on('change', async (change) => {
+      try {
+        if (!change.doc) {
+          return;
+        }
+
+        const { _id, _rev } = change.doc;
+        const timestamp = Date.now();
+        const doc = JSON.stringify(change.doc);
+        const subject = getSubject(change.doc);
+
+        await postgresPool.query(
+          'INSERT INTO medic_documents (_id, _rev, timestamp, doc, subject) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (_id, _rev) DO UPDATE SET doc = $4, subject = $5',
+          [_id, _rev, timestamp, doc, subject]
+        );
+
+        // If this is a contact document, also insert into contacts table
+        await insertContactIfNeeded(change.doc);
+
+        logger.debug(`Copied document ${_id} rev ${_rev} to postgres`);
+      } catch (err) {
+        logger.error('Error copying document to postgres: %o', err);
+      }
+    });
+
+    feed.on('error', (err) => {
+      logger.error('Changes feed error: %o', err);
+    });
+
+    logger.info('Started CouchDB to Postgres changes listener');
+  };
+
+  // Start the changes listener
+  startChangesListener();
 }

@@ -20,6 +20,7 @@ const READ_ONLY_IDS = ['resources', 'branding', 'service-worker-meta', 'zscore-c
 const DDOC_PREFIX = ['_design/'];
 const LAST_REPLICATED_SEQ_KEY = 'medic-last-replicated-seq';
 const LAST_REPLICATED_DATE_KEY = 'medic-last-replicated-date';
+const LAST_REPLICATED_TIMESTAMP_KEY = 'medic-last-replicated-timestamp';
 const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const META_SYNC_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const BATCH_SIZE = 100;
@@ -168,7 +169,9 @@ export class DBSyncService {
     );
 
     try {
-      const result = await this.replicationService.replicateFrom();
+      const sinceTimestamp = this.getLastReplicatedTimestamp();
+      const result = await this.replicationService.replicateFrom(sinceTimestamp);
+      this.setLastReplicatedTimestamp(Date.now());
       telemetryEntry.recordSuccess(result);
     } catch (err) {
       telemetryEntry.recordFailure(err, this.knownOnlineState);
@@ -195,6 +198,18 @@ export class DBSyncService {
 
   private getLastReplicationDate() {
     return window.localStorage.getItem(LAST_REPLICATED_DATE_KEY);
+  }
+
+  private getLastReplicatedTimestamp(): number | undefined {
+    const timestamp = window.localStorage.getItem(LAST_REPLICATED_TIMESTAMP_KEY);
+    return timestamp ? Number(timestamp) : undefined;
+  }
+
+  private setLastReplicatedTimestamp(timestamp: number) {
+    if (!timestamp) {
+      return;
+    }
+    window.localStorage.setItem(LAST_REPLICATED_TIMESTAMP_KEY, timestamp.toString());
   }
 
   private async syncMedic(replicateFromServer: boolean, successiveSyncs = 0) {

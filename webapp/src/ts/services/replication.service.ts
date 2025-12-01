@@ -17,25 +17,29 @@ export class ReplicationService {
 
   private readonly BATCH_SIZE=100;
 
-  async replicateFrom():Promise<{ read_docs: number }> {
-    const remoteDocIdsRevs = await this.getRemoteDocs();
+  async replicateFrom(sinceTimestamp?: number):Promise<{ read_docs: number }> {
+    const changes = await this.getChanges(sinceTimestamp);
     const localDocs = await this.dbService.get().allDocs();
 
     const localIdRevMap = Object.assign({}, ...localDocs.rows.map(row => ({ [row.id]: row.value?.rev })));
-    const remoteIdRevMap = Object.assign({}, ...remoteDocIdsRevs.map(({ id, rev }) => ({ [id]: rev })));
+    const remoteIdRevMap = Object.assign({}, ...changes.map(({ id, rev }) => ({ [id]: rev })));
 
-    const nbrDownloaded = await this.getMissingDocs(localIdRevMap, remoteDocIdsRevs);
+    const nbrDownloaded = await this.getMissingDocs(localIdRevMap, changes);
     const nbrDeleted = await this.getDeletesAndPurges(localIdRevMap, remoteIdRevMap);
     return { read_docs: nbrDeleted + nbrDownloaded };
   }
 
-  private async getRemoteDocs():Promise<{ id; rev }[]> {
-    const getIdsReq = this.http.get<{ doc_ids_revs: { id; rev }[]}>(
-      '/api/v1/replication/get-ids',
+  private async getChanges(sinceTimestamp?: number):Promise<{ id; rev }[]> {
+    let url = '/api/v1/replication/changes';
+    if (sinceTimestamp) {
+      url += `?since=${sinceTimestamp}`;
+    }
+    const getChangesReq = this.http.get<{ changes: { id; rev }[]}>(
+      url,
       { responseType: 'json' }
     );
-    const response = await lastValueFrom(getIdsReq);
-    return response.doc_ids_revs;
+    const response = await lastValueFrom(getChangesReq);
+    return response.changes;
   }
 
   private async getMissingDocs(localIdRevMap, remoteDocIdsRevs):Promise<number> {

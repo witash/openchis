@@ -687,6 +687,12 @@ app.get(
   authorization.onlineUserPassThrough,
   replication.getDocIds,
 );
+app.get(
+  '/api/v1/replication/changes',
+  authorization.handleAuthErrors,
+  authorization.getUserSettings,
+  replication.getChanges,
+);
 app.post(
   '/api/v1/replication/get-deletes',
   jsonParser,
@@ -854,7 +860,33 @@ app.put(editPath, canEdit);
 app.post(editPath, canEdit);
 app.delete(editPath, canEdit);
 
-app.all('*path', function(req, res) {
+// Block offline users from accessing the medic database directly via CouchDB
+const blockOfflineUsersFromCouchDB = (req, res, next) => {
+  // Check if this is a request to the medic database
+  if (!req.path.startsWith(routePrefix)) {
+    return next();
+  }
+
+  auth
+    .check(req)
+    .then(userCtx => {
+      if (userCtx && !auth.isOnlineOnly(userCtx)) {
+        // Offline user trying to access CouchDB directly - block it
+        return serverUtils.error(
+          { code: 403, message: 'Offline users cannot access the medic database directly' },
+          req,
+          res
+        );
+      }
+      next();
+    })
+    .catch(() => {
+      // If auth check fails, let it pass through (will be handled by CouchDB)
+      next();
+    });
+};
+
+app.all('*path', blockOfflineUsersFromCouchDB, function(req, res) {
   proxy.web(req, res);
 });
 
