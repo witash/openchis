@@ -65,8 +65,6 @@ const wellKnownController = require('./controllers/well-known');
 const connectedUserLog = require('./middleware/connected-user-log').log;
 const getLocale = require('./middleware/locale').getLocale;
 const startupLog = require('./services/setup/startup-log');
-const dbInfo = require('./controllers/db-info');
-const localDocs = require('./controllers/local-docs');
 const staticResources = /\/(templates|static)\//;
 // CouchDB is very relaxed in matching routes
 const routePrefix = `/${environment.db}/`;
@@ -262,42 +260,17 @@ app.get('/.well-known/assetlinks.json', wellKnownController.assetlinks);
 // TODO: investigate blocking writes to _users from the outside. Reads maybe as well, though may be harder
 //       https://github.com/medic/medic/issues/4089
 
-app.get('/', async function(req, res) {
+app.get('/', function(req, res) {
   if (req.headers.accept === 'application/json') {
     // CouchDB request for /dbinfo from previous versions
-    // For offline users authenticated via postgres, return synthetic dbinfo
-    // For online users, proxy to CouchDB
-    try {
-      const userCtx = await auth.getUserCtx(req);
-      if (userCtx && !auth.isOnlineOnly(userCtx)) {
-        // Offline user - return synthetic dbinfo from postgres
-        return dbInfo.getDbInfo(req, res);
-      }
-    } catch (err) {
-      // Not authenticated or error - fall through to proxy
-      logger.debug('Error getting userCtx for dbinfo, proxying to CouchDB: %o', err);
-    }
-    // Online user or not authenticated - proxy to CouchDB
+    // Required for service compatibility during upgrade.
     proxy.web(req, res);
   } else {
     res.sendFile(path.join(resources.webappPath, 'index.html')); // Webapp's index - entry point
   }
 });
 
-app.get('/dbinfo', connectedUserLog, async (req, res) => {
-  // For offline users authenticated via postgres, return synthetic dbinfo
-  // For online users, proxy to CouchDB
-  try {
-    const userCtx = await auth.getUserCtx(req);
-    if (userCtx && !auth.isOnlineOnly(userCtx)) {
-      // Offline user - return synthetic dbinfo from postgres
-      return dbInfo.getDbInfo(req, res);
-    }
-  } catch (err) {
-    // Not authenticated or error - fall through to proxy
-    logger.debug('Error getting userCtx for dbinfo, proxying to CouchDB: %o', err);
-  }
-  // Online user or not authenticated - proxy to CouchDB
+app.get('/dbinfo', connectedUserLog, (req, res) => {
   req.url = '/';
   proxy.web(req, res);
 });
@@ -395,7 +368,8 @@ const UNAUDITED_ENDPOINTS = [
   // This takes arbitrary JSON, not whole documents with `_id`s, so it's not
   // auditable in our current framework
   // Replication machinery we don't care to audit
-  // NOTE: _local and _revs_diff are handled separately for offline users (see below)
+  `${routePrefix}_local/*doc`,
+  `${routePrefix}_revs_diff`,
   `${routePrefix}_missing_revs`,
   // NB: _changes, _all_docs, _bulk_get are dealt with elsewhere:
   // see `changesHandler`, `allDocsHandler`, `bulkGetHandler`
@@ -415,69 +389,6 @@ UNAUDITED_ENDPOINTS.forEach(function(url) {
   app.all(url, function(req, res) {
     proxy.web(req, res);
   });
-});
-
-// Handle _revs_diff for offline users (return empty results)
-// PouchDB calls this during initialization to check which revisions are missing
-// For offline users, we return empty results to indicate all revisions exist
-app.post(`${routePrefix}_revs_diff`, jsonParser, async (req, res) => {
-  try {
-    const userCtx = await auth.getUserCtx(req);
-    if (userCtx && !auth.isOnlineOnly(userCtx)) {
-      // Offline user - return empty results (no missing revisions)
-      logger.debug('Returning empty _revs_diff response for offline user');
-      return res.json({});
-    }
-  } catch (err) {
-    logger.debug('Error getting userCtx for _revs_diff, proxying to CouchDB: %o', err);
-  }
-  // Online user or not authenticated - proxy to CouchDB
-  proxy.web(req, res);
-});
-
-// Handle _local documents for offline users (stored in postgres)
-// For online users, proxy to CouchDB
-const localDocsPath = `${routePrefix}_local/:doc`;
-app.get(localDocsPath, async (req, res) => {
-  try {
-    const userCtx = await auth.getUserCtx(req);
-    if (userCtx && !auth.isOnlineOnly(userCtx)) {
-      // Offline user - get from postgres
-      return localDocs.get(req, res);
-    }
-  } catch (err) {
-    logger.debug('Error getting userCtx for _local doc, proxying to CouchDB: %o', err);
-  }
-  // Online user or not authenticated - proxy to CouchDB
-  proxy.web(req, res);
-});
-
-app.put(localDocsPath, jsonParser, async (req, res) => {
-  try {
-    const userCtx = await auth.getUserCtx(req);
-    if (userCtx && !auth.isOnlineOnly(userCtx)) {
-      // Offline user - save to postgres
-      return localDocs.put(req, res);
-    }
-  } catch (err) {
-    logger.debug('Error getting userCtx for _local doc, proxying to CouchDB: %o', err);
-  }
-  // Online user or not authenticated - proxy to CouchDB
-  proxy.web(req, res);
-});
-
-app.delete(localDocsPath, async (req, res) => {
-  try {
-    const userCtx = await auth.getUserCtx(req);
-    if (userCtx && !auth.isOnlineOnly(userCtx)) {
-      // Offline user - delete from postgres
-      return localDocs.delete(req, res);
-    }
-  } catch (err) {
-    logger.debug('Error getting userCtx for _local doc, proxying to CouchDB: %o', err);
-  }
-  // Online user or not authenticated - proxy to CouchDB
-  proxy.web(req, res);
 });
 
 app.get('/setup/poll', function(req, res) {
