@@ -397,4 +397,50 @@ if (UNIT_TEST_ENV) {
 
   // Start the changes listener
   startChangesListener();
+
+  // Save user document to postgres
+  const saveUserToPostgres = async (doc) => {
+    const { _id, _rev } = doc;
+    const timestamp = Date.now();
+    const docJson = JSON.stringify(doc);
+
+    await postgresPool.query(
+      'INSERT INTO users (_id, _rev, timestamp, doc) VALUES ($1, $2, $3, $4) ON CONFLICT (_id, _rev) DO UPDATE SET doc = $4',
+      [_id, _rev, timestamp, docJson]
+    );
+
+    logger.debug(`Saved user ${_id} rev ${_rev} to postgres`);
+  };
+
+  module.exports.saveUserToPostgres = saveUserToPostgres;
+
+  // Changes listener for _users database
+  const startUsersChangesListener = () => {
+    const feed = module.exports.users.changes({
+      since: 0,
+      live: true,
+      include_docs: true
+    });
+
+    feed.on('change', async (change) => {
+      try {
+        if (!change.doc) {
+          return;
+        }
+
+        await saveUserToPostgres(change.doc);
+      } catch (err) {
+        logger.error('Error copying user document to postgres: %o', err);
+      }
+    });
+
+    feed.on('error', (err) => {
+      logger.error('Users changes feed error: %o', err);
+    });
+
+    logger.info('Started _users to Postgres changes listener');
+  };
+
+  // Start the users changes listener
+  startUsersChangesListener();
 }
