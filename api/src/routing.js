@@ -316,7 +316,7 @@ app.get(`${routePrefix}privacy-policy`, privacyPolicyController.get);
 const ONLINE_ONLY_ENDPOINTS = [
   '_design/*db/_list/*list',
   '_design/*db/_show/*show',
-  '_design/*db/_view/*view',
+  // Note: _design/*db/_view/*view is handled separately below with postgres queries
   '_find{/*index}',
   '_explain{/*index}',
   '_index{/*index}',
@@ -373,9 +373,9 @@ const UNAUDITED_ENDPOINTS = [
   `${routePrefix}_missing_revs`,
   // NB: _changes, _all_docs, _bulk_get are dealt with elsewhere:
   // see `changesHandler`, `allDocsHandler`, `bulkGetHandler`
+  // NB: _design/*db/_view/*view is handled separately with postgres queries
   `${routePrefix}_design/*db/_list/*list`,
   `${routePrefix}_design/*db/_show/*show`,
-  `${routePrefix}_design/*db/_view/*view`,
   // Interacting with mongo filters uses POST
   `${routePrefix}_find`,
   `${routePrefix}_explain`,
@@ -390,6 +390,15 @@ UNAUDITED_ENDPOINTS.forEach(function(url) {
     proxy.web(req, res);
   });
 });
+
+// Handle medic-client views with postgres queries
+const viewsController = require('./controllers/views');
+app.get(
+  `${routePrefix}_design/medic-client/_view/:viewName`,
+  authorization.handleAuthErrors,
+  authorization.getUserSettings,
+  viewsController.request
+);
 
 app.get('/setup/poll', function(req, res) {
   const p = require('../package.json');
@@ -607,20 +616,20 @@ app.post(
   changesHandler
 );
 
-// filter _all_docs requests for offline users
+// _all_docs requests now use postgres for all users
 const allDocsHandler = require('./controllers/all-docs').request;
 const allDocsPath = `${routePrefix}_all_docs{/{*any}}`;
 
 app.get(
   allDocsPath,
   authorization.handleAuthErrors,
-  onlineUserProxy,
+  authorization.getUserSettings,
   allDocsHandler
 );
 app.post(
   allDocsPath,
   authorization.handleAuthErrors,
-  onlineUserProxy,
+  authorization.getUserSettings,
   jsonParser,
   allDocsHandler
 );
@@ -884,33 +893,7 @@ app.put(editPath, canEdit);
 app.post(editPath, canEdit);
 app.delete(editPath, canEdit);
 
-// Block offline users from accessing the medic database directly via CouchDB
-const blockOfflineUsersFromCouchDB = (req, res, next) => {
-  // Check if this is a request to the medic database
-  if (!req.path.startsWith(routePrefix)) {
-    return next();
-  }
-
-  auth
-    .check(req)
-    .then(userCtx => {
-      if (userCtx && !auth.isOnlineOnly(userCtx)) {
-        // Offline user trying to access CouchDB directly - block it
-        return serverUtils.error(
-          { code: 403, message: 'Offline users cannot access the medic database directly' },
-          req,
-          res
-        );
-      }
-      next();
-    })
-    .catch(() => {
-      // If auth check fails, let it pass through (will be handled by CouchDB)
-      next();
-    });
-};
-
-app.all('*path', blockOfflineUsersFromCouchDB, function(req, res) {
+app.all('*path', function(req, res) {
   proxy.web(req, res);
 });
 
