@@ -274,6 +274,7 @@ export class AppComponent implements OnInit, AfterViewInit {
         return;
       }
 
+      console.info('status updated:', state, to, from);
       const statusUpdates:any = {};
       if (to === SyncStatus.Success) {
         statusUpdates.lastSuccessTo = now;

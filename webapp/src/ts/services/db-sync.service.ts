@@ -15,38 +15,12 @@ import { MigrationsService } from '@mm-services/migrations.service';
 import { ReplicationService } from '@mm-services/replication.service';
 import { PerformanceService } from '@mm-services/performance.service';
 
-const READ_ONLY_TYPES = ['form', 'translations'];
-const READ_ONLY_IDS = ['resources', 'branding', 'service-worker-meta', 'zscore-charts', 'settings', 'partners'];
-const DDOC_PREFIX = ['_design/'];
 const LAST_REPLICATED_SEQ_KEY = 'medic-last-replicated-seq';
 const LAST_REPLICATED_DATE_KEY = 'medic-last-replicated-date';
 const LAST_REPLICATED_TIMESTAMP_KEY = 'medic-last-replicated-timestamp';
 const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const META_SYNC_INTERVAL = 30 * 60 * 1000; // 30 minutes
-const BATCH_SIZE = 100;
 const MAX_SUCCESSIVE_SYNCS = 2;
-
-const readOnlyFilter = function(doc) {
-  // Never replicate "purged" documents upwards
-  const keys = Object.keys(doc);
-  if (keys.length === 4 &&
-    keys.includes('_id') &&
-    keys.includes('_rev') &&
-    keys.includes('_deleted') &&
-    keys.includes('purged')) {
-    return false;
-  }
-
-  // don't try to replicate read only docs back to the server
-  return (
-    READ_ONLY_TYPES.indexOf(doc.type) === -1 &&
-    READ_ONLY_IDS.indexOf(doc._id) === -1 &&
-    doc._id.indexOf(DDOC_PREFIX) !== 0
-  );
-};
-// PouchDB uses this value to generate a replication id. Because of non-deterministic minification, there's a high risk
-// of invalidating existent replication checkpointers after upgrade, causing users to restart upwards replication.
-readOnlyFilter.toString = () => '';
 
 export enum SyncStatus {
   Unknown = 'unknown',
@@ -101,7 +75,13 @@ export class DBSyncService {
     return !this.sessionService.isOnlineOnly();
   }
 
-  private replicateToRetry({ batchSize=BATCH_SIZE }={}) {
+  private async replicateTo() {
+    this.canReplicateToServer = await this.authService.has('can_edit');
+    if (!this.canReplicateToServer) {
+      console.debug('Not authorized to replicate - that\'s ok, skip silently');
+      return;
+    }
+
     const telemetryEntry = new DbSyncTelemetry(
       this.telemetryService,
       this.performanceService,
@@ -110,51 +90,15 @@ export class DBSyncService {
       this.getLastReplicationDate(),
     );
 
-    const options = {
-      filter: readOnlyFilter,
-      batch_size: batchSize
-    };
-
-    const remote = this.dbService.get({ remote: true });
-    return this.dbService.get()
-      .replicate
-      .to(remote, options)
-      .on('denied', (err) => {
-        console.error('Denied replicating to remote server', err);
-        this.dbSyncRetryService.retryForbiddenFailure(err);
-        telemetryEntry.recordDenied();
-      })
-      .on('error', (err) => {
-        console.error('Error replicating to remote server', err);
-        telemetryEntry.recordFailure(err, this.knownOnlineState);
-      })
-      .then(info => {
-        console.debug(`Replication to successful`, info);
-        this.setLastReplicatedSeq(info?.last_seq);
-        telemetryEntry.recordSuccess(info);
-      })
-      .catch(err => {
-        if (err.code === 413 && batchSize > 1) {
-          batchSize = Math.floor(batchSize / 2);
-          console.warn('Error attempting to replicate too much data to the server. ' +
-            `Trying again with batch size of ${batchSize}`);
-          return this.replicateToRetry({ batchSize });
-        }
-        console.error('Error replicating to remote server', err);
-        throw err;
-      });
-  }
-
-  private async replicateTo() {
-    this.canReplicateToServer = await this.authService.has('can_edit');
-    if (!this.canReplicateToServer) {
-      console.debug('Not authorized to replicate - that\'s ok, skip silently');
-      return;
-    }
-
     try {
-      await this.replicateToRetry();
+      const sinceSeq = this.getLastReplicatedSeq();
+      const result = await this.replicationService.replicateTo(sinceSeq);
+      this.setLastReplicatedSeq(result.last_seq);
+      console.debug(`Replication to successful`, result);
+      telemetryEntry.recordSuccess(result);
     } catch (err) {
+      telemetryEntry.recordFailure(err, this.knownOnlineState);
+      console.error('Error replicating to remote server', err);
       return err;
     }
   }
@@ -230,20 +174,12 @@ export class DBSyncService {
   }
 
   private async getSyncState(hasErrors): Promise<SyncState> {
-    const currentSeq = await this.getCurrentSeq();
-    const lastReplicatedSeq = this.getLastReplicatedSeq();
-
-    if (!hasErrors && (!this.canReplicateToServer || currentSeq === lastReplicatedSeq)) {
+    // Simplified logic for custom postgres sync
+    if (!hasErrors) {
       return { to: SyncStatus.Success, from: SyncStatus.Success };
     }
 
-    if (hasErrors && currentSeq === lastReplicatedSeq) {
-      // No changes to send, but may have some to receive
-      return { state: SyncStatus.Unknown };
-    }
-
-    // Definitely need to sync something
-    return { to: SyncStatus.Required, from: SyncStatus.Required };
+    return { state: SyncStatus.Unknown };
   }
 
   private updateAfterSyncMedic(syncState, force) {
@@ -290,15 +226,15 @@ export class DBSyncService {
     }
 
     const telemetryEntry = new DbSyncTelemetry(this.telemetryService, this.performanceService, 'meta', 'sync');
-    const remote = this.dbService.get({ meta: true, remote: true });
+    //const remote = this.dbService.get({ meta: true, remote: true });
     const local = this.dbService.get({ meta: true });
     let currentSeq;
     return local
       .info()
       .then(info => currentSeq = info.update_seq)
       .then(() => Promise.all([
-        local.replicate.to(remote),
-        local.replicate.from(remote),
+        //local.replicate.to(remote),
+        //local.replicate.from(remote),
       ]))
       .then(([ push, pull ]) => {
         telemetryEntry.recordSuccess({ push, pull });
