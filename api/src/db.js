@@ -272,16 +272,45 @@ if (UNIT_TEST_ENV) {
     }
 
     const parentId = extractParentId(doc);
+    // contact_type is the contact_type field for type='contact', otherwise it's the type itself
+    const contactType = doc.type === 'contact' ? doc.contact_type : doc.type;
 
     try {
       await postgresPool.query(
-        'INSERT INTO contacts (id, type, parent) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET type = $2, parent = $3',
-        [doc._id, doc.type, parentId]
+        'INSERT INTO contacts (id, type, contact_type, parent) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET type = $2, contact_type = $3, parent = $4',
+        [doc._id, doc.type, contactType, parentId]
       );
       logger.debug(`Inserted contact ${doc._id} (${doc.type}) with parent ${parentId}`);
     } catch (err) {
       logger.error(`Error inserting contact ${doc._id}: %o`, err);
       // Don't fail the whole operation if contact insert fails
+    }
+  };
+
+  const extractContactId = (doc) => {
+    if (!doc.contact) {
+      return null;
+    }
+    // Contact can be either a string (id) or an object with _id
+    return typeof doc.contact === 'string' ? doc.contact : doc.contact._id;
+  };
+
+  const insertReportIfNeeded = async (doc, subject) => {
+    if (doc.type !== 'data_record') {
+      return;
+    }
+
+    const contactId = extractContactId(doc);
+
+    try {
+      await postgresPool.query(
+        'INSERT INTO reports (id, type, subject, contact) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET type = $2, subject = $3, contact = $4',
+        [doc._id, doc.type, subject, contactId]
+      );
+      logger.debug(`Inserted report ${doc._id} with subject ${subject} and contact ${contactId}`);
+    } catch (err) {
+      logger.error(`Error inserting report ${doc._id}: %o`, err);
+      // Don't fail the whole operation if report insert fails
     }
   };
 
@@ -362,6 +391,9 @@ if (UNIT_TEST_ENV) {
 
     // If this is a contact document, also insert into contacts table
     await insertContactIfNeeded(doc);
+
+    // If this is a report (data_record), also insert into reports table
+    await insertReportIfNeeded(doc, subject);
 
     logger.debug(`Saved document ${_id} rev ${_rev} to postgres`);
   };
