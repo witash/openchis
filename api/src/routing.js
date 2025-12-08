@@ -316,7 +316,7 @@ app.get(`${routePrefix}privacy-policy`, privacyPolicyController.get);
 const ONLINE_ONLY_ENDPOINTS = [
   '_design/*db/_list/*list',
   '_design/*db/_show/*show',
-  // Note: _design/*db/_view/*view is handled separately below with postgres queries
+  '_design/*db/_view/*view',
   '_find{/*index}',
   '_explain{/*index}',
   '_index{/*index}',
@@ -331,36 +331,12 @@ ONLINE_ONLY_ENDPOINTS.forEach(url => {
 });
 
 // allow anyone to access their session
-app.all('/_session', connectedUserLog, async function(req, res) {
+app.all('/_session', connectedUserLog, function(req, res) {
   const given = cookie.get(req, 'userCtx');
   if (given) {
     // update the expiry date on the cookie to keep it fresh
     cookie.setUserCtx(res, decodeURIComponent(given));
   }
-
-  // For offline users with postgres sessions, return userCtx directly
-  // instead of proxying to CouchDB (which doesn't recognize postgres session IDs)
-  try {
-    const userCtx = await auth.getUserCtx(req);
-    if (userCtx) {
-      // Successfully validated session (either postgres or CouchDB)
-      // Return CouchDB-compatible session response
-      return res.json({
-        ok: true,
-        userCtx: userCtx,
-        info: {
-          authenticated: 'cookie',
-          authentication_db: '_users',
-          authentication_handlers: ['cookie', 'default']
-        }
-      });
-    }
-  } catch (err) {
-    // Not authenticated - fall through to CouchDB proxy
-    logger.debug('Session validation failed, proxying to CouchDB: %o', err);
-  }
-
-  // Not authenticated or online user - proxy to CouchDB
   proxy.web(req, res);
 });
 
@@ -373,9 +349,9 @@ const UNAUDITED_ENDPOINTS = [
   `${routePrefix}_missing_revs`,
   // NB: _changes, _all_docs, _bulk_get are dealt with elsewhere:
   // see `changesHandler`, `allDocsHandler`, `bulkGetHandler`
-  // NB: _design/*db/_view/*view is handled separately with postgres queries
   `${routePrefix}_design/*db/_list/*list`,
   `${routePrefix}_design/*db/_show/*show`,
+  `${routePrefix}_design/*db/_view/*view`,
   // Interacting with mongo filters uses POST
   `${routePrefix}_find`,
   `${routePrefix}_explain`,
@@ -391,7 +367,7 @@ UNAUDITED_ENDPOINTS.forEach(function(url) {
   });
 });
 
-// Handle medic-client views with postgres queries
+// Handle medic-client views (falls back to CouchDB, postgres queries can be added later)
 const viewsController = require('./controllers/views');
 app.get(
   `${routePrefix}_design/medic-client/_view/:viewName`,
@@ -616,20 +592,20 @@ app.post(
   changesHandler
 );
 
-// _all_docs requests now use postgres for all users
+// filter _all_docs requests for offline users
 const allDocsHandler = require('./controllers/all-docs').request;
 const allDocsPath = `${routePrefix}_all_docs{/{*any}}`;
 
 app.get(
   allDocsPath,
   authorization.handleAuthErrors,
-  authorization.getUserSettings,
+  onlineUserProxy,
   allDocsHandler
 );
 app.post(
   allDocsPath,
   authorization.handleAuthErrors,
-  authorization.getUserSettings,
+  onlineUserProxy,
   jsonParser,
   allDocsHandler
 );

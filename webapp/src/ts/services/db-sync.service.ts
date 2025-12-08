@@ -15,9 +15,9 @@ import { MigrationsService } from '@mm-services/migrations.service';
 import { ReplicationService } from '@mm-services/replication.service';
 import { PerformanceService } from '@mm-services/performance.service';
 
-const LAST_REPLICATED_SEQ_KEY = 'medic-last-replicated-seq';
+const LAST_REPLICATED_SEQ_KEY = 'medic-last-replicated-seq';  // For uploads (local PouchDB seq)
 const LAST_REPLICATED_DATE_KEY = 'medic-last-replicated-date';
-const LAST_REPLICATED_TIMESTAMP_KEY = 'medic-last-replicated-timestamp';
+const LAST_DOWNLOADED_SEQ_KEY = 'medic-last-downloaded-seq';  // For downloads (server postgres seq)
 const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const META_SYNC_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const MAX_SUCCESSIVE_SYNCS = 2;
@@ -91,7 +91,6 @@ export class DBSyncService {
     );
 
     try {
-      console.debug(`Hey! Im starting syncing`);
       const sinceSeq = this.getLastReplicatedSeq();
       const result = await this.replicationService.replicateTo(sinceSeq);
       this.setLastReplicatedSeq(result.last_seq);
@@ -114,9 +113,12 @@ export class DBSyncService {
     );
 
     try {
-      const sinceTimestamp = this.getLastReplicatedTimestamp();
-      const result = await this.replicationService.replicateFrom(sinceTimestamp);
-      this.setLastReplicatedTimestamp(Date.now());
+      const sinceSeq = this.getLastDownloadedSeq();
+      const result = await this.replicationService.replicateFrom(sinceSeq);
+      // Update with the server's sequence from response
+      if (result.last_seq) {
+        this.setLastDownloadedSeq(result.last_seq);
+      }
       telemetryEntry.recordSuccess(result);
     } catch (err) {
       telemetryEntry.recordFailure(err, this.knownOnlineState);
@@ -146,16 +148,16 @@ export class DBSyncService {
     return window.localStorage.getItem(LAST_REPLICATED_DATE_KEY);
   }
 
-  private getLastReplicatedTimestamp(): number | undefined {
-    const timestamp = window.localStorage.getItem(LAST_REPLICATED_TIMESTAMP_KEY);
-    return timestamp ? Number(timestamp) : undefined;
+  private getLastDownloadedSeq(): number | undefined {
+    const seq = window.localStorage.getItem(LAST_DOWNLOADED_SEQ_KEY);
+    return seq ? Number(seq) : undefined;
   }
 
-  private setLastReplicatedTimestamp(timestamp: number) {
-    if (!timestamp) {
+  private setLastDownloadedSeq(seq: number) {
+    if (!seq) {
       return;
     }
-    window.localStorage.setItem(LAST_REPLICATED_TIMESTAMP_KEY, timestamp.toString());
+    window.localStorage.setItem(LAST_DOWNLOADED_SEQ_KEY, seq.toString());
   }
 
   private async syncMedic(replicateFromServer: boolean, successiveSyncs = 0) {

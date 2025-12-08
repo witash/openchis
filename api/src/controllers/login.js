@@ -19,7 +19,6 @@ const template = require('../services/template');
 const rateLimitService = require('../services/rate-limit');
 const serverUtils = require('../server-utils');
 const sso = require('../services/sso-login');
-const postgresAuth = require('../services/postgres-auth');
 
 const PASSWORD_RESET_URL = '/medic/password-reset';
 
@@ -212,12 +211,6 @@ const unauthorizedError = (message) => {
 };
 
 const getSessionCookie = res => {
-  // For postgres sessions, the response has sessionId directly
-  if (res.fromPostgres && res.sessionId) {
-    return `AuthSession=${res.sessionId}; Version=1; Path=/; HttpOnly`;
-  }
-
-  // For CouchDB sessions, extract from response headers
   const sessionCookie = res.headers.getSetCookie().find(cookie => cookie.indexOf('AuthSession') === 0);
   if (!sessionCookie) {
     throw unauthorizedError('Not logged in');
@@ -225,27 +218,10 @@ const getSessionCookie = res => {
   return sessionCookie;
 };
 
-const createSession = async req => {
+const createSession = req => {
   const user = req.body.user;
   const password = req.body.password;
 
-  // Try postgres authentication first (for offline users)
-  try {
-    const sessionId = await postgresAuth.authenticate(user, password);
-    if (sessionId) {
-      logger.debug(`User ${user} authenticated via postgres`);
-      return {
-        status: 200,
-        sessionId: sessionId,
-        fromPostgres: true
-      };
-    }
-  } catch (err) {
-    logger.error('Error during postgres authentication: %o', err);
-  }
-
-  // Fall back to CouchDB authentication (for online users, admins, etc.)
-  logger.debug(`User ${user} not found in postgres, trying CouchDB`);
   return request.post({
     url: new URL('/_session', environment.serverUrlNoAuth).toString(),
     json: true,
@@ -311,20 +287,6 @@ const renderTokenLogin = (req, res) => {
 };
 
 const getUserCtxRetry = async (options, retry = 10) => {
-  // Try postgres session validation first
-  if (options.headers && options.headers.Cookie) {
-    const sessionIdMatch = options.headers.Cookie.match(/AuthSession=([^;]+)/);
-    if (sessionIdMatch) {
-      const sessionId = sessionIdMatch[1];
-      const userCtx = await postgresAuth.validateSession(sessionId);
-      if (userCtx) {
-        logger.debug(`Session ${sessionId} validated via postgres`);
-        return userCtx;
-      }
-    }
-  }
-
-  // Fall back to CouchDB session validation
   try {
     return await auth.getUserCtx(options);
   } catch (err) {

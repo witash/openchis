@@ -31,7 +31,7 @@ module.exports = {
     }
 
     return allDocs
-      .request(req.userCtx, req.parsedQuery, req.body)
+      .filterOfflineRequest(req.userCtx, req.parsedQuery, req.body)
       .then(results => res.json(results))
       .catch(err => serverUtils.serverError(err, req, res));
   }

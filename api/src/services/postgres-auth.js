@@ -164,7 +164,7 @@ const cleanupExpiredSessions = async () => {
 const getUserDoc = async (username) => {
   try {
     const result = await db.postgres.query(
-      'SELECT doc FROM users WHERE doc->>\'name\' = $1 ORDER BY timestamp DESC LIMIT 1',
+      'SELECT doc FROM users WHERE doc->>\'name\' = $1 ORDER BY seq DESC LIMIT 1',
       [username]
     );
 

@@ -29,7 +29,7 @@ module.exports = {
   },
   getChanges: async (req, res) => {
     try {
-      const sinceTimestamp = req.query.since ? parseInt(req.query.since) : 0;
+      const sinceSeq = req.query.since ? parseInt(req.query.since) : 0;
       const limit = req.query.limit ? parseInt(req.query.limit) : 100;
       const userCtx = req.userCtx;
 
@@ -44,11 +44,12 @@ module.exports = {
         );
       }
 
-      // Query for documents changed since the given timestamp, ordered by timestamp for pagination
+      // Query for documents changed since the given postgres sequence, ordered by seq for pagination
+      // seq is a postgres-native auto-incrementing BIGSERIAL (not CouchDB sequence which is a string)
       // Check if subject is a descendant of ANY of the user's facilities (up to 5 levels deep)
       // Returns full docs directly instead of just id/rev pairs
       const query = `
-        SELECT DISTINCT ON (md._id) md._id, md._rev, md.doc, md.timestamp
+        SELECT DISTINCT ON (md._id) md._id, md._rev, md.doc, md.seq
         FROM medic_documents md
         LEFT JOIN contacts c ON md.subject = c.id
         LEFT JOIN contacts p1 ON c.parent = p1.id
@@ -56,7 +57,7 @@ module.exports = {
         LEFT JOIN contacts p3 ON p2.parent = p3.id
         LEFT JOIN contacts p4 ON p3.parent = p4.id
         LEFT JOIN contacts p5 ON p4.parent = p5.id
-        WHERE md.timestamp > $2
+        WHERE md.seq > $2
           AND (
             md.subject = ANY($1)
             OR c.parent = ANY($1)
@@ -67,11 +68,11 @@ module.exports = {
             OR md.subject = '_all'
             OR md.subject IS NULL
           )
-        ORDER BY md._id, md.timestamp DESC
+        ORDER BY md._id, md.seq DESC
         LIMIT $3
       `;
 
-      const result = await db.postgres.query(query, [facilityIds, sinceTimestamp, limit]);
+      const result = await db.postgres.query(query, [facilityIds, sinceSeq, limit]);
 
       const docs = result.rows.map(row => row.doc);
       const docIds = docs.map(doc => doc._id);
@@ -106,11 +107,11 @@ module.exports = {
         }
       }
 
-      const lastTimestamp = result.rows.length > 0
-        ? Math.max(...result.rows.map(row => parseInt(row.timestamp)))
-        : null;
+      // Get the max seq from results - seq is postgres-native integer so max() works correctly
+      const seqValues = result.rows.map(row => parseInt(row.seq));
+      const lastSeq = seqValues.length > 0 ? Math.max(...seqValues) : null;
 
-      return res.json({ docs, last_timestamp: lastTimestamp });
+      return res.json({ docs, last_seq: lastSeq });
     } catch (err) {
       return serverUtils.serverError(err, req, res);
     }

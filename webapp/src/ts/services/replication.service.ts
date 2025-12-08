@@ -19,12 +19,12 @@ export class ReplicationService {
   private readonly READ_ONLY_TYPES = ['form', 'translations'];
   private readonly READ_ONLY_IDS = ['resources', 'branding', 'service-worker-meta', 'zscore-charts', 'settings', 'partners'];
 
-  async replicateFrom(sinceTimestamp?: number):Promise<{ read_docs: number }> {
+  async replicateFrom(sinceSeq?: number):Promise<{ read_docs: number, last_seq?: number }> {
     let totalSaved = 0;
-    let currentTimestamp = sinceTimestamp;
+    let currentSeq = sinceSeq;
 
     while (true) {
-      const { docs, last_timestamp } = await this.getChanges(currentTimestamp);
+      const { docs, last_seq } = await this.getChanges(currentSeq);
 
       if (docs.length === 0) {
         break;
@@ -43,20 +43,21 @@ export class ReplicationService {
         totalSaved += docsToSave.length;
       }
 
+      // Update current seq for next iteration
+      if (last_seq != null) {
+        currentSeq = last_seq;
+      }
+
       // If we got fewer docs than batch size, we're done
       if (docs.length < this.BATCH_SIZE) {
         break;
       }
-
-      currentTimestamp = last_timestamp ?? undefined;
     }
 
-    return { read_docs: totalSaved };
+    return { read_docs: totalSaved, last_seq: currentSeq };
   }
 
   async replicateTo(sinceSeq?: number):Promise<{ docs_written: number, last_seq: number }> {
-    console.debug(`Hey! Lets get the changes`);
-    console.debug(sinceSeq);
     // Get local changes since last sync
     const changesResult = await this.dbService.get().changes({
       since: sinceSeq || 0,
@@ -64,8 +65,6 @@ export class ReplicationService {
       batch_size: this.BATCH_SIZE
     });
 
-    console.debug(`Alright, here's the results`);
-    console.debug(changesResult);
     // Filter out purged, read-only, and design docs (same logic as readOnlyFilter)
     const docsToSend = changesResult.results
       .map(change => change.doc)
@@ -107,20 +106,16 @@ export class ReplicationService {
       { responseType: 'json' }
     );
     await lastValueFrom(bulkDocsReq);
-    console.debug('Sending docs....');
-    console.debug(docsToSend);
-    console.debug('Last sequence....');
-    console.debug(changesResult);
 
     return { docs_written: docsToSend.length, last_seq: changesResult.last_seq };
   }
 
-  private async getChanges(sinceTimestamp?: number):Promise<{ docs: any[], last_timestamp: number | null }> {
+  private async getChanges(sinceSeq?: number):Promise<{ docs: any[], last_seq: number | null }> {
     let url = `/api/v1/replication/changes?limit=${this.BATCH_SIZE}`;
-    if (sinceTimestamp) {
-      url += `&since=${sinceTimestamp}`;
+    if (sinceSeq) {
+      url += `&since=${sinceSeq}`;
     }
-    const getChangesReq = this.http.get<{ docs: any[], last_timestamp: number | null }>(
+    const getChangesReq = this.http.get<{ docs: any[], last_seq: number | null }>(
       url,
       { responseType: 'json' }
     );

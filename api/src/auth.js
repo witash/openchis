@@ -5,7 +5,6 @@ const environment = require('@medic/environment');
 const config = require('./config');
 const dataContext = require('./services/data-context');
 const { roles, users } = require('@medic/user-management')(config, db, dataContext);
-const postgresAuth = require('./services/postgres-auth');
 
 const contentLengthRegex = /^content-length$/i;
 const contentTypeRegex = /^content-type$/i;
@@ -50,21 +49,7 @@ module.exports = {
     return _.every(permissions, _.partial(hasPermission, userCtx));
   },
 
-  getUserCtx: async req => {
-    // Try postgres session validation first
-    if (req.headers && req.headers.cookie) {
-      const sessionIdMatch = req.headers.cookie.match(/AuthSession=([^;]+)/);
-      if (sessionIdMatch) {
-        const sessionId = sessionIdMatch[1];
-        const userCtx = await postgresAuth.validateSession(sessionId);
-        if (userCtx) {
-          req.headers['X-Medic-User'] = userCtx.name;
-          return userCtx;
-        }
-      }
-    }
-
-    // Fall back to CouchDB session validation
+  getUserCtx: req => {
     return get('/_session', req.headers)
       .catch(err => {
         if (err.status === 401) {

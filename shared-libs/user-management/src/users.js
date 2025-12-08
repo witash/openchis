@@ -870,40 +870,14 @@ const hydrateUserSettings = (userSettings) => {
     });
 };
 
-const getUserDoc = async (username, dbName) => {
-  // Fetch user documents from postgres instead of CouchDB
-  if (dbName === 'users') {
-    try {
-      const result = await db.postgres.query(
-        'SELECT doc FROM users WHERE doc->>\'name\' = $1 ORDER BY timestamp DESC LIMIT 1',
-        [username]
-      );
-
-      if (result.rows.length === 0) {
-        const err = new Error(`Failed to find user with name [${username}] in the [${dbName}] database.`);
-        err.status = 404;
-        throw err;
-      }
-
-      return result.rows[0].doc;
-    } catch (err) {
-      if (err.status === 404) {
-        err.message = `Failed to find user with name [${username}] in the [${dbName}] database.`;
-      }
-      throw err;
+const getUserDoc = (username, dbName) => db[dbName]
+  .get(createID(username))
+  .catch(err => {
+    if (err.status === 404) {
+      err.message = `Failed to find user with name [${username}] in the [${dbName}] database.`;
     }
-  }
-
-  // For other databases (like medic), continue using CouchDB
-  return db[dbName]
-    .get(createID(username))
-    .catch(err => {
-      if (err.status === 404) {
-        err.message = `Failed to find user with name [${username}] in the [${dbName}] database.`;
-      }
-      return Promise.reject(err);
-    });
-};
+    return Promise.reject(err);
+  });
 
 const getUserDocsByName = (name) => Promise.all(['users', 'medic'].map(dbName => getUserDoc(name, dbName)));
 
