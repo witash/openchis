@@ -15,9 +15,9 @@ import { MigrationsService } from '@mm-services/migrations.service';
 import { ReplicationService } from '@mm-services/replication.service';
 import { PerformanceService } from '@mm-services/performance.service';
 
-const LAST_REPLICATED_SEQ_KEY = 'medic-last-replicated-seq';  // For uploads (local PouchDB seq)
+const LAST_REPLICATED_SEQ_DOC_ID = '_local/last-replicated-seq';  // For uploads (local PouchDB seq) - stored in local db
 const LAST_REPLICATED_DATE_KEY = 'medic-last-replicated-date';
-const LAST_DOWNLOADED_SEQ_KEY = 'medic-last-downloaded-seq';  // For downloads (server postgres seq)
+const LAST_DOWNLOADED_SEQ_DOC_ID = '_local/last-downloaded-seq';  // For downloads (server postgres seq) - stored in local db
 const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const META_SYNC_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const MAX_SUCCESSIVE_SYNCS = 2;
@@ -91,9 +91,9 @@ export class DBSyncService {
     );
 
     try {
-      const sinceSeq = this.getLastReplicatedSeq();
+      const sinceSeq = await this.getLastReplicatedSeq();
       const result = await this.replicationService.replicateTo(sinceSeq);
-      this.setLastReplicatedSeq(result.last_seq);
+      await this.setLastReplicatedSeq(result.last_seq);
       console.debug(`Replication to successful`, result);
       telemetryEntry.recordSuccess(result);
     } catch (err) {
@@ -113,11 +113,11 @@ export class DBSyncService {
     );
 
     try {
-      const sinceSeq = this.getLastDownloadedSeq();
+      const sinceSeq = await this.getLastDownloadedSeq();
       const result = await this.replicationService.replicateFrom(sinceSeq);
       // Update with the server's sequence from response
       if (result.last_seq) {
-        this.setLastDownloadedSeq(result.last_seq);
+        await this.setLastDownloadedSeq(result.last_seq);
       }
       telemetryEntry.recordSuccess(result);
     } catch (err) {
@@ -131,33 +131,64 @@ export class DBSyncService {
     return this.dbService.get().info().then(info => info.update_seq);
   }
 
-  private getLastReplicatedSeq(): number {
-    //return 0;
-    return Number(window.localStorage.getItem(LAST_REPLICATED_SEQ_KEY)) || 0;
+  private async getLastReplicatedSeq(): Promise<number> {
+    try {
+      const doc = await this.dbService.get().get(LAST_REPLICATED_SEQ_DOC_ID);
+      return doc.seq || 0;
+    } catch (err) {
+      // Doc doesn't exist yet
+      return 0;
+    }
   }
 
-  private setLastReplicatedSeq(sequence: number) {
+  private async setLastReplicatedSeq(sequence: number) {
     if (!sequence) {
       return;
     }
 
-    window.localStorage.setItem(LAST_REPLICATED_SEQ_KEY, sequence.toString());
+    try {
+      const doc = await this.dbService.get().get(LAST_REPLICATED_SEQ_DOC_ID);
+      doc.seq = sequence;
+      await this.dbService.get().put(doc);
+    } catch (err) {
+      // Doc doesn't exist, create it
+      await this.dbService.get().put({
+        _id: LAST_REPLICATED_SEQ_DOC_ID,
+        seq: sequence
+      });
+    }
   }
 
   private getLastReplicationDate() {
     return window.localStorage.getItem(LAST_REPLICATED_DATE_KEY);
   }
 
-  private getLastDownloadedSeq(): number | undefined {
-    const seq = window.localStorage.getItem(LAST_DOWNLOADED_SEQ_KEY);
-    return seq ? Number(seq) : undefined;
+  private async getLastDownloadedSeq(): Promise<number | undefined> {
+    try {
+      const doc = await this.dbService.get().get(LAST_DOWNLOADED_SEQ_DOC_ID);
+      return doc.seq;
+    } catch (err) {
+      // Doc doesn't exist yet
+      return undefined;
+    }
   }
 
-  private setLastDownloadedSeq(seq: number) {
+  private async setLastDownloadedSeq(seq: number) {
     if (!seq) {
       return;
     }
-    window.localStorage.setItem(LAST_DOWNLOADED_SEQ_KEY, seq.toString());
+
+    try {
+      const doc = await this.dbService.get().get(LAST_DOWNLOADED_SEQ_DOC_ID);
+      doc.seq = seq;
+      await this.dbService.get().put(doc);
+    } catch (err) {
+      // Doc doesn't exist, create it
+      await this.dbService.get().put({
+        _id: LAST_DOWNLOADED_SEQ_DOC_ID,
+        seq: seq
+      });
+    }
   }
 
   private async syncMedic(replicateFromServer: boolean, successiveSyncs = 0) {
@@ -179,7 +210,7 @@ export class DBSyncService {
 
   private async getSyncState(hasErrors): Promise<SyncState> {
     const currentSeq = await this.getCurrentSeq();
-    const lastReplicatedSeq = this.getLastReplicatedSeq();
+    const lastReplicatedSeq = await this.getLastReplicatedSeq();
 
     if (!hasErrors && (!this.canReplicateToServer || currentSeq === lastReplicatedSeq)) {
       return { to: SyncStatus.Success, from: SyncStatus.Success };
