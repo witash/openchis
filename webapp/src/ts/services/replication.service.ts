@@ -20,18 +20,43 @@ export class ReplicationService {
   private readonly READ_ONLY_IDS = ['resources', 'branding', 'service-worker-meta', 'zscore-charts', 'settings', 'partners'];
 
   async replicateFrom(sinceTimestamp?: number):Promise<{ read_docs: number }> {
-    const changes = await this.getChanges(sinceTimestamp);
-    const localDocs = await this.dbService.get().allDocs();
+    let totalSaved = 0;
+    let currentTimestamp = sinceTimestamp;
 
-    const localIdRevMap = Object.assign({}, ...localDocs.rows.map(row => ({ [row.id]: row.value?.rev })));
-    const remoteIdRevMap = Object.assign({}, ...changes.map(({ id, rev }) => ({ [id]: rev })));
+    while (true) {
+      const { docs, last_timestamp } = await this.getChanges(currentTimestamp);
 
-    const nbrDownloaded = await this.getMissingDocs(localIdRevMap, changes);
-    const nbrDeleted = await this.getDeletesAndPurges(localIdRevMap, remoteIdRevMap);
-    return { read_docs: nbrDeleted + nbrDownloaded };
+      if (docs.length === 0) {
+        break;
+      }
+
+      // Get local docs to filter out ones we already have with same rev
+      const localDocs = await this.dbService.get().allDocs();
+      const localIdRevMap = Object.assign({}, ...localDocs.rows.map(row => ({ [row.id]: row.value?.rev })));
+
+      // Filter to only docs we don't have or have different rev
+      const docsToSave = docs.filter(doc => !localIdRevMap[doc._id] || localIdRevMap[doc._id] !== doc._rev);
+
+      if (docsToSave.length > 0) {
+        await this.dbService.get().bulkDocs(docsToSave, { new_edits: false });
+        this.rulesEngineService.monitorExternalChanges({ docs: docsToSave });
+        totalSaved += docsToSave.length;
+      }
+
+      // If we got fewer docs than batch size, we're done
+      if (docs.length < this.BATCH_SIZE) {
+        break;
+      }
+
+      currentTimestamp = last_timestamp ?? undefined;
+    }
+
+    return { read_docs: totalSaved };
   }
 
   async replicateTo(sinceSeq?: number):Promise<{ docs_written: number, last_seq: number }> {
+    console.debug(`Hey! Lets get the changes`);
+    console.debug(sinceSeq);
     // Get local changes since last sync
     const changesResult = await this.dbService.get().changes({
       since: sinceSeq || 0,
@@ -39,6 +64,8 @@ export class ReplicationService {
       batch_size: this.BATCH_SIZE
     });
 
+    console.debug(`Alright, here's the results`);
+    console.debug(changesResult);
     // Filter out purged, read-only, and design docs (same logic as readOnlyFilter)
     const docsToSend = changesResult.results
       .map(change => change.doc)
@@ -80,69 +107,24 @@ export class ReplicationService {
       { responseType: 'json' }
     );
     await lastValueFrom(bulkDocsReq);
+    console.debug('Sending docs....');
+    console.debug(docsToSend);
+    console.debug('Last sequence....');
+    console.debug(changesResult);
 
     return { docs_written: docsToSend.length, last_seq: changesResult.last_seq };
   }
 
-  private async getChanges(sinceTimestamp?: number):Promise<{ id; rev }[]> {
-    let url = '/api/v1/replication/changes';
+  private async getChanges(sinceTimestamp?: number):Promise<{ docs: any[], last_timestamp: number | null }> {
+    let url = `/api/v1/replication/changes?limit=${this.BATCH_SIZE}`;
     if (sinceTimestamp) {
-      url += `?since=${sinceTimestamp}`;
+      url += `&since=${sinceTimestamp}`;
     }
-    const getChangesReq = this.http.get<{ changes: { id; rev }[]}>(
+    const getChangesReq = this.http.get<{ docs: any[], last_timestamp: number | null }>(
       url,
       { responseType: 'json' }
     );
-    const response = await lastValueFrom(getChangesReq);
-    return response.changes;
+    return await lastValueFrom(getChangesReq);
   }
 
-  private async getMissingDocs(localIdRevMap, remoteDocIdsRevs):Promise<number> {
-    const docIdRevsToDownload = remoteDocIdsRevs
-      .filter(({ id, rev }) => !localIdRevMap[id] || localIdRevMap[id] !== rev);
-    const nbrDocs = docIdRevsToDownload.length;
-
-    while (docIdRevsToDownload.length) {
-      const batch = docIdRevsToDownload.splice(0, this.BATCH_SIZE);
-      await this.downloadDocsBatch(batch);
-    }
-
-    return nbrDocs;
-  }
-
-  private async getDeletesAndPurges(localIdRevMap, remoteIdRevMap):Promise<number> {
-    const missingRemoteIds = Object.keys(localIdRevMap).filter(id => !remoteIdRevMap[id]);
-    let nbrDeletes = 0;
-
-    while (missingRemoteIds.length) {
-      const batch = missingRemoteIds.splice(0, this.BATCH_SIZE);
-      const getDeleteListReq =  this.http.post<{ doc_ids: []}>(
-        '/api/v1/replication/get-deletes',
-        { doc_ids: batch },
-        { responseType: 'json' }
-      );
-      const localIdsToDelete = (await lastValueFrom(getDeleteListReq)).doc_ids;
-      const deleteDocs = localIdsToDelete
-        .map(id => ({ _id: id, _rev: localIdRevMap[id], _deleted: true, purged: true }));
-      await this.dbService.get().bulkDocs(deleteDocs);
-      nbrDeletes += deleteDocs.length;
-    }
-    return nbrDeletes;
-  }
-
-  private async downloadDocsBatch(batch):Promise<void> {
-    // Use direct HTTP call instead of PouchDB's bulkGet to avoid CouchDB protocol calls (like dbinfo)
-    const bulkGetReq = this.http.post<{ results: { docs: { ok?: any }[] }[] }>(
-      '/medic/_bulk_get?attachments=true&revs=true',
-      { docs: batch },
-      { responseType: 'json' }
-    );
-    const res = await lastValueFrom(bulkGetReq);
-
-    const docs = res.results
-      .map(result => result.docs && result.docs[0] && result.docs[0].ok)
-      .filter(doc => doc);
-    await this.dbService.get().bulkDocs(docs, { new_edits: false });
-    this.rulesEngineService.monitorExternalChanges({ docs });
-  }
 }

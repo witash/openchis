@@ -91,6 +91,7 @@ export class DBSyncService {
     );
 
     try {
+      console.debug(`Hey! Im starting syncing`);
       const sinceSeq = this.getLastReplicatedSeq();
       const result = await this.replicationService.replicateTo(sinceSeq);
       this.setLastReplicatedSeq(result.last_seq);
@@ -129,6 +130,7 @@ export class DBSyncService {
   }
 
   private getLastReplicatedSeq(): number {
+    //return 0;
     return Number(window.localStorage.getItem(LAST_REPLICATED_SEQ_KEY)) || 0;
   }
 
@@ -174,12 +176,20 @@ export class DBSyncService {
   }
 
   private async getSyncState(hasErrors): Promise<SyncState> {
-    // Simplified logic for custom postgres sync
-    if (!hasErrors) {
+    const currentSeq = await this.getCurrentSeq();
+    const lastReplicatedSeq = this.getLastReplicatedSeq();
+
+    if (!hasErrors && (!this.canReplicateToServer || currentSeq === lastReplicatedSeq)) {
       return { to: SyncStatus.Success, from: SyncStatus.Success };
     }
 
-    return { state: SyncStatus.Unknown };
+    if (hasErrors && currentSeq === lastReplicatedSeq) {
+      // No changes to send, but may have some to receive
+      return { state: SyncStatus.Unknown };
+    }
+
+    // Definitely need to sync something
+    return { to: SyncStatus.Required, from: SyncStatus.Required };
   }
 
   private updateAfterSyncMedic(syncState, force) {

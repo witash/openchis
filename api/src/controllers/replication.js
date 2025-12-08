@@ -30,6 +30,7 @@ module.exports = {
   getChanges: async (req, res) => {
     try {
       const sinceTimestamp = req.query.since ? parseInt(req.query.since) : 0;
+      const limit = req.query.limit ? parseInt(req.query.limit) : 100;
       const userCtx = req.userCtx;
 
       // Get user's facility_id (their associated contacts) - this is an array
@@ -43,11 +44,11 @@ module.exports = {
         );
       }
 
-      // Query for all documents changed since the given timestamp
+      // Query for documents changed since the given timestamp, ordered by timestamp for pagination
       // Check if subject is a descendant of ANY of the user's facilities (up to 5 levels deep)
-      // by joining the contacts table and checking parent relationships
+      // Returns full docs directly instead of just id/rev pairs
       const query = `
-        SELECT DISTINCT ON (md._id) md._id, md._rev, md.timestamp
+        SELECT DISTINCT ON (md._id) md._id, md._rev, md.doc, md.timestamp
         FROM medic_documents md
         LEFT JOIN contacts c ON md.subject = c.id
         LEFT JOIN contacts p1 ON c.parent = p1.id
@@ -67,16 +68,49 @@ module.exports = {
             OR md.subject IS NULL
           )
         ORDER BY md._id, md.timestamp DESC
+        LIMIT $3
       `;
 
-      const result = await db.postgres.query(query, [facilityIds, sinceTimestamp]);
+      const result = await db.postgres.query(query, [facilityIds, sinceTimestamp, limit]);
 
-      const changes = result.rows.map(row => ({
-        id: row._id,
-        rev: row._rev
-      }));
+      const docs = result.rows.map(row => row.doc);
+      const docIds = docs.map(doc => doc._id);
 
-      return res.json({ changes });
+      // Fetch attachments for these docs
+      if (docIds.length > 0) {
+        const attachmentsResult = await db.postgres.query(
+          'SELECT doc_id, name, content_type, digest, length, revpos, data FROM attachments WHERE doc_id = ANY($1)',
+          [docIds]
+        );
+
+        // Group attachments by doc_id
+        const attachmentsByDocId = {};
+        for (const att of attachmentsResult.rows) {
+          if (!attachmentsByDocId[att.doc_id]) {
+            attachmentsByDocId[att.doc_id] = {};
+          }
+          attachmentsByDocId[att.doc_id][att.name] = {
+            content_type: att.content_type,
+            digest: att.digest,
+            length: att.length,
+            revpos: att.revpos,
+            data: att.data
+          };
+        }
+
+        // Merge attachments into docs
+        for (const doc of docs) {
+          if (attachmentsByDocId[doc._id]) {
+            doc._attachments = attachmentsByDocId[doc._id];
+          }
+        }
+      }
+
+      const lastTimestamp = result.rows.length > 0
+        ? Math.max(...result.rows.map(row => parseInt(row.timestamp)))
+        : null;
+
+      return res.json({ docs, last_timestamp: lastTimestamp });
     } catch (err) {
       return serverUtils.serverError(err, req, res);
     }

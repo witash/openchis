@@ -246,6 +246,7 @@ if (UNIT_TEST_ENV) {
     password: 'postgres',
     host: 'localhost',
     port: 5432,
+    max: 10,
     database: 'postgres'
   });
 
@@ -280,7 +281,7 @@ if (UNIT_TEST_ENV) {
         'INSERT INTO contacts (id, type, contact_type, parent) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET type = $2, contact_type = $3, parent = $4',
         [doc._id, doc.type, contactType, parentId]
       );
-      logger.debug(`Inserted contact ${doc._id} (${doc.type}) with parent ${parentId}`);
+      //logger.debug(`Inserted contact ${doc._id} (${doc.type}) with parent ${parentId}`);
     } catch (err) {
       logger.error(`Error inserting contact ${doc._id}: %o`, err);
       // Don't fail the whole operation if contact insert fails
@@ -307,7 +308,7 @@ if (UNIT_TEST_ENV) {
         'INSERT INTO reports (id, type, subject, contact) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET type = $2, subject = $3, contact = $4',
         [doc._id, doc.type, subject, contactId]
       );
-      logger.debug(`Inserted report ${doc._id} with subject ${subject} and contact ${contactId}`);
+      //logger.debug(`Inserted report ${doc._id} with subject ${subject} and contact ${contactId}`);
     } catch (err) {
       logger.error(`Error inserting report ${doc._id}: %o`, err);
       // Don't fail the whole operation if report insert fails
@@ -395,10 +396,128 @@ if (UNIT_TEST_ENV) {
     // If this is a report (data_record), also insert into reports table
     await insertReportIfNeeded(doc, subject);
 
-    logger.debug(`Saved document ${_id} rev ${_rev} to postgres`);
+    //logger.debug(`Saved document ${_id} rev ${_rev} to postgres`);
   };
 
   module.exports.saveDocToPostgres = saveDocToPostgres;
+
+  // Batch save multiple documents to postgres in single queries
+  const saveDocsToPostgresBatch = async (docs, options = {}) => {
+    const { fetchAttachmentsFromCouchDB = false } = options;
+    const timestamp = Date.now();
+
+    // Prepare data for batch inserts
+    const medicDocsValues = [];
+    const medicDocsParams = [];
+    const contactsValues = [];
+    const contactsParams = [];
+    const reportsValues = [];
+    const reportsParams = [];
+    const attachmentsValues = [];
+    const attachmentsParams = [];
+
+    let medicParamIdx = 1;
+    let contactParamIdx = 1;
+    let reportParamIdx = 1;
+    let attachmentParamIdx = 1;
+
+    for (const doc of docs) {
+      const { _id, _rev } = doc;
+      if (!_id || !_rev) {
+        continue;
+      }
+
+      // Process attachments - convert to stubs for main doc storage
+      let docToStore = doc;
+      if (doc._attachments) {
+        // Store attachment data
+        for (const [name, att] of Object.entries(doc._attachments)) {
+          if (att.data) {
+            attachmentsValues.push(`($${attachmentParamIdx}, $${attachmentParamIdx + 1}, $${attachmentParamIdx + 2}, $${attachmentParamIdx + 3}, $${attachmentParamIdx + 4}, $${attachmentParamIdx + 5}, $${attachmentParamIdx + 6})`);
+            attachmentsParams.push(_id, name, att.content_type, att.digest, att.length, att.revpos, att.data);
+            attachmentParamIdx += 7;
+          }
+        }
+
+        // Convert to stubs for main doc
+        docToStore = { ...doc };
+        docToStore._attachments = {};
+        for (const [name, att] of Object.entries(doc._attachments)) {
+          docToStore._attachments[name] = {
+            content_type: att.content_type,
+            digest: att.digest,
+            length: att.length,
+            revpos: att.revpos,
+            stub: true
+          };
+        }
+      }
+
+      const docJson = JSON.stringify(docToStore);
+      const subject = getSubject(doc);
+
+      // medic_documents insert
+      medicDocsValues.push(`($${medicParamIdx}, $${medicParamIdx + 1}, $${medicParamIdx + 2}, $${medicParamIdx + 3}, $${medicParamIdx + 4})`);
+      medicDocsParams.push(_id, _rev, timestamp, docJson, subject);
+      medicParamIdx += 5;
+
+      // contacts insert if needed
+      if (isContactType(doc)) {
+        const parentId = extractParentId(doc);
+        const contactType = doc.type === 'contact' ? doc.contact_type : doc.type;
+        contactsValues.push(`($${contactParamIdx}, $${contactParamIdx + 1}, $${contactParamIdx + 2}, $${contactParamIdx + 3})`);
+        contactsParams.push(_id, doc.type, contactType, parentId);
+        contactParamIdx += 4;
+      }
+
+      // reports insert if needed
+      if (doc.type === 'data_record') {
+        const contactId = extractContactId(doc);
+        reportsValues.push(`($${reportParamIdx}, $${reportParamIdx + 1}, $${reportParamIdx + 2}, $${reportParamIdx + 3})`);
+        reportsParams.push(_id, doc.type, subject, contactId);
+        reportParamIdx += 4;
+      }
+    }
+
+    // Execute batch inserts
+    const queries = [];
+
+    if (medicDocsValues.length > 0) {
+      queries.push(postgresPool.query(
+        `INSERT INTO medic_documents (_id, _rev, timestamp, doc, subject) VALUES ${medicDocsValues.join(', ')}
+         ON CONFLICT (_id, _rev) DO UPDATE SET doc = EXCLUDED.doc, subject = EXCLUDED.subject`,
+        medicDocsParams
+      ));
+    }
+
+    if (contactsValues.length > 0) {
+      queries.push(postgresPool.query(
+        `INSERT INTO contacts (id, type, contact_type, parent) VALUES ${contactsValues.join(', ')}
+         ON CONFLICT (id) DO UPDATE SET type = EXCLUDED.type, contact_type = EXCLUDED.contact_type, parent = EXCLUDED.parent`,
+        contactsParams
+      ));
+    }
+
+    if (reportsValues.length > 0) {
+      queries.push(postgresPool.query(
+        `INSERT INTO reports (id, type, subject, contact) VALUES ${reportsValues.join(', ')}
+         ON CONFLICT (id) DO UPDATE SET type = EXCLUDED.type, subject = EXCLUDED.subject, contact = EXCLUDED.contact`,
+        reportsParams
+      ));
+    }
+
+    if (attachmentsValues.length > 0) {
+      queries.push(postgresPool.query(
+        `INSERT INTO attachments (doc_id, name, content_type, digest, length, revpos, data) VALUES ${attachmentsValues.join(', ')}
+         ON CONFLICT (doc_id, name) DO UPDATE SET content_type = EXCLUDED.content_type, digest = EXCLUDED.digest, length = EXCLUDED.length, revpos = EXCLUDED.revpos, data = EXCLUDED.data`,
+        attachmentsParams
+      ));
+    }
+
+    await Promise.all(queries);
+  };
+
+  module.exports.saveDocsToPostgresBatch = saveDocsToPostgresBatch;
 
   // Changes listener to copy documents from medic database to postgres
   const startChangesListener = () => {

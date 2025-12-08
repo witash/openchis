@@ -1,8 +1,5 @@
 const utils = require('./utils');
-const { setUiStatus, displayTooManyDocsWarning } = require('./ui-status');
-
-let docIdsRevs;
-let remoteDocCount;
+const { setUiStatus } = require('./ui-status');
 
 const INITIAL_REPLICATION_LOG = '_local/initial-replication';
 const BATCH_SIZE = 100;
@@ -52,49 +49,53 @@ const getDataUsage = () => {
   }
 };
 
-const getMissingDocIdsRevsPairs = async (localDb, remoteDocIdsRevs) => {
-  const localDocs = await getLocalDocList(localDb);
-  return remoteDocIdsRevs.filter(({ id, rev }) => !localDocs[id] || localDocs[id] !== rev);
-};
-
-const getDownloadList = async (localDb = true) => {
-  // Use the same endpoint as normal replication, but without since parameter for initial sync
-  const response = await utils.fetchJSON('/api/v1/replication/changes');
-
-  docIdsRevs = await getMissingDocIdsRevsPairs(localDb, response.changes);
-  remoteDocCount = response.changes.length;
-
-  // Note: The new endpoint doesn't have warn/limit fields, so we skip the warning display
-};
-
-const getLocalDocList = async (localDb) => {
+const getLocalDocMap = async (localDb) => {
   const response = await localDb.allDocs();
-
   const localDocMap = {};
   response.rows.forEach(row => localDocMap[row.id] = row.value && row.value.rev);
   return localDocMap;
 };
 
-const getDocsBatch = async (remoteDb, localDb) => {
-  const batch = docIdsRevs.splice(0, BATCH_SIZE);
-
-  if (!batch.length) {
-    return;
+const getChangesBatch = async (sinceTimestamp) => {
+  let url = `/api/v1/replication/changes?limit=${BATCH_SIZE}`;
+  if (sinceTimestamp) {
+    url += `&since=${sinceTimestamp}`;
   }
-
-  const res = await remoteDb.bulkGet({ docs: batch, attachments: true, revs: true });
-  const docs = res.results
-    .map(result => result.docs && result.docs[0] && result.docs[0].ok)
-    .filter(doc => doc);
-  await localDb.bulkDocs(docs, { new_edits: false });
+  return await utils.fetchJSON(url);
 };
 
-const downloadDocs = async (remoteDb, localDb) => {
-  setUiStatus('FETCH_INFO', { count: remoteDocCount - docIdsRevs.length, total: remoteDocCount });
-  do {
-    await getDocsBatch(remoteDb, localDb);
-    setUiStatus('FETCH_INFO', { count: remoteDocCount - docIdsRevs.length, total: remoteDocCount });
-  } while (docIdsRevs.length > 0);
+const downloadDocs = async (localDb) => {
+  let currentTimestamp;
+  let totalDownloaded = 0;
+
+  setUiStatus('FETCH_INFO', { count: 0, total: '?' });
+
+  while (true) {
+    const { docs, last_timestamp } = await getChangesBatch(currentTimestamp);
+
+    if (docs.length === 0) {
+      break;
+    }
+
+    // Get local docs to filter out ones we already have with same rev
+    const localDocMap = await getLocalDocMap(localDb);
+    const docsToSave = docs.filter(doc => !localDocMap[doc._id] || localDocMap[doc._id] !== doc._rev);
+
+    if (docsToSave.length > 0) {
+      await localDb.bulkDocs(docsToSave, { new_edits: false });
+      totalDownloaded += docsToSave.length;
+    }
+
+    setUiStatus('FETCH_INFO', { count: totalDownloaded, total: totalDownloaded + (docs.length === BATCH_SIZE ? '+' : '') });
+
+    if (docs.length < BATCH_SIZE) {
+      break;
+    }
+
+    currentTimestamp = last_timestamp;
+  }
+
+  return totalDownloaded;
 };
 
 const shouldReplicateDoc = (doc) => {
@@ -162,8 +163,7 @@ const replicate = async (remoteDb, localDb) => {
   await startInitialReplication(localDb);
 
   setUiStatus('POLL_REPLICATION');
-  await getDownloadList(localDb);
-  await downloadDocs(remoteDb, localDb);
+  await downloadDocs(localDb);
   await writeCheckpointers(remoteDb, localDb);
 
   await completeInitialReplication(localDb);
