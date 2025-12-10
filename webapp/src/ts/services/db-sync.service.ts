@@ -13,14 +13,45 @@ import { GlobalActions } from '@mm-actions/global';
 import { TranslateService } from '@mm-services/translate.service';
 import { MigrationsService } from '@mm-services/migrations.service';
 import { ReplicationService } from '@mm-services/replication.service';
+import { PostgresReplicationService } from '@mm-services/postgres-replication.service';
 import { PerformanceService } from '@mm-services/performance.service';
+import { HttpClient } from '@angular/common/http';
+import { lastValueFrom } from 'rxjs';
 
-const LAST_REPLICATED_SEQ_DOC_ID = '_local/last-replicated-seq';  // For uploads (local PouchDB seq) - stored in local db
+const READ_ONLY_TYPES = ['form', 'translations'];
+const READ_ONLY_IDS = ['resources', 'branding', 'service-worker-meta', 'zscore-charts', 'settings', 'partners'];
+const DDOC_PREFIX = ['_design/'];
+const LAST_REPLICATED_SEQ_KEY = 'medic-last-replicated-seq';
 const LAST_REPLICATED_DATE_KEY = 'medic-last-replicated-date';
-const LAST_DOWNLOADED_SEQ_DOC_ID = '_local/last-downloaded-seq';  // For downloads (server postgres seq) - stored in local db
+// Keys for postgres sync protocol
+const LAST_REPLICATED_SEQ_DOC_ID = '_local/last-replicated-seq';
+const LAST_DOWNLOADED_SEQ_DOC_ID = '_local/last-downloaded-seq';
 const SYNC_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const META_SYNC_INTERVAL = 30 * 60 * 1000; // 30 minutes
+const BATCH_SIZE = 100;
 const MAX_SUCCESSIVE_SYNCS = 2;
+
+const readOnlyFilter = function(doc) {
+  // Never replicate "purged" documents upwards
+  const keys = Object.keys(doc);
+  if (keys.length === 4 &&
+    keys.includes('_id') &&
+    keys.includes('_rev') &&
+    keys.includes('_deleted') &&
+    keys.includes('purged')) {
+    return false;
+  }
+
+  // don't try to replicate read only docs back to the server
+  return (
+    READ_ONLY_TYPES.indexOf(doc.type) === -1 &&
+    READ_ONLY_IDS.indexOf(doc._id) === -1 &&
+    doc._id.indexOf(DDOC_PREFIX) !== 0
+  );
+};
+// PouchDB uses this value to generate a replication id. Because of non-deterministic minification, there's a high risk
+// of invalidating existent replication checkpointers after upgrade, causing users to restart upwards replication.
+readOnlyFilter.toString = () => '';
 
 export enum SyncStatus {
   Unknown = 'unknown',
@@ -55,6 +86,8 @@ export class DBSyncService {
     private translateService:TranslateService,
     private migrationsService:MigrationsService,
     private replicationService:ReplicationService,
+    private postgresReplicationService:PostgresReplicationService,
+    private http:HttpClient,
   ) {
     this.globalActions = new GlobalActions(this.store);
   }
@@ -64,6 +97,7 @@ export class DBSyncService {
   private knownOnlineState = window.navigator.onLine;
   private canReplicateToServer = false;
   private syncIsRecent = false; // true when a replication has succeeded within one interval
+  private usePostgresSync: boolean | null = null;
   private readonly intervalPromises: { sync?: any; meta?: any} = {
     sync: undefined,
     meta: undefined,
@@ -75,6 +109,67 @@ export class DBSyncService {
     return !this.sessionService.isOnlineOnly();
   }
 
+  private async getSyncProtocol(): Promise<boolean> {
+    if (this.usePostgresSync !== null) {
+      return this.usePostgresSync;
+    }
+    try {
+      const response = await lastValueFrom(
+        this.http.get<{ usePostgresSync: boolean }>('/api/v1/sync/info')
+      );
+      this.usePostgresSync = response.usePostgresSync;
+      return this.usePostgresSync;
+    } catch (err) {
+      console.warn('Error fetching sync protocol info, defaulting to Nairobi protocol', err);
+      this.usePostgresSync = false;
+      return false;
+    }
+  }
+
+  private replicateToRetry({ batchSize=BATCH_SIZE }={}) {
+    const telemetryEntry = new DbSyncTelemetry(
+      this.telemetryService,
+      this.performanceService,
+      'medic',
+      'to',
+      this.getLastReplicationDate(),
+    );
+
+    const options = {
+      filter: readOnlyFilter,
+      batch_size: batchSize
+    };
+
+    const remote = this.dbService.get({ remote: true });
+    return this.dbService.get()
+      .replicate
+      .to(remote, options)
+      .on('denied', (err) => {
+        console.error('Denied replicating to remote server', err);
+        this.dbSyncRetryService.retryForbiddenFailure(err);
+        telemetryEntry.recordDenied();
+      })
+      .on('error', (err) => {
+        console.error('Error replicating to remote server', err);
+        telemetryEntry.recordFailure(err, this.knownOnlineState);
+      })
+      .then(info => {
+        console.debug(`Replication to successful`, info);
+        this.setLastReplicatedSeq(info?.last_seq);
+        telemetryEntry.recordSuccess(info);
+      })
+      .catch(err => {
+        if (err.code === 413 && batchSize > 1) {
+          batchSize = Math.floor(batchSize / 2);
+          console.warn('Error attempting to replicate too much data to the server. ' +
+            `Trying again with batch size of ${batchSize}`);
+          return this.replicateToRetry({ batchSize });
+        }
+        console.error('Error replicating to remote server', err);
+        throw err;
+      });
+  }
+
   private async replicateTo() {
     this.canReplicateToServer = await this.authService.has('can_edit');
     if (!this.canReplicateToServer) {
@@ -82,6 +177,24 @@ export class DBSyncService {
       return;
     }
 
+    const usePostgres = await this.getSyncProtocol();
+
+    if (usePostgres) {
+      return this.replicateToPostgres();
+    } else {
+      return this.replicateToNairobi();
+    }
+  }
+
+  private async replicateToNairobi() {
+    try {
+      await this.replicateToRetry();
+    } catch (err) {
+      return err;
+    }
+  }
+
+  private async replicateToPostgres() {
     const telemetryEntry = new DbSyncTelemetry(
       this.telemetryService,
       this.performanceService,
@@ -91,19 +204,29 @@ export class DBSyncService {
     );
 
     try {
-      const sinceSeq = await this.getLastReplicatedSeq();
-      const result = await this.replicationService.replicateTo(sinceSeq);
-      await this.setLastReplicatedSeq(result.last_seq);
-      console.debug(`Replication to successful`, result);
+      const sinceSeq = await this.getLastReplicatedSeqPostgres();
+      const result = await this.postgresReplicationService.replicateTo(sinceSeq);
+      await this.setLastReplicatedSeqPostgres(result.last_seq);
+      console.debug(`Replication to (postgres) successful`, result);
       telemetryEntry.recordSuccess(result);
     } catch (err) {
       telemetryEntry.recordFailure(err, this.knownOnlineState);
-      console.error('Error replicating to remote server', err);
+      console.error('Error replicating to remote server (postgres)', err);
       return err;
     }
   }
 
   private async replicateFrom() {
+    const usePostgres = await this.getSyncProtocol();
+
+    if (usePostgres) {
+      return this.replicateFromPostgres();
+    } else {
+      return this.replicateFromNairobi();
+    }
+  }
+
+  private async replicateFromNairobi() {
     const telemetryEntry = new DbSyncTelemetry(
       this.telemetryService,
       this.performanceService,
@@ -113,12 +236,7 @@ export class DBSyncService {
     );
 
     try {
-      const sinceSeq = await this.getLastDownloadedSeq();
-      const result = await this.replicationService.replicateFrom(sinceSeq);
-      // Update with the server's sequence from response
-      if (result.last_seq) {
-        await this.setLastDownloadedSeq(result.last_seq);
-      }
+      const result = await this.replicationService.replicateFrom();
       telemetryEntry.recordSuccess(result);
     } catch (err) {
       telemetryEntry.recordFailure(err, this.knownOnlineState);
@@ -127,11 +245,49 @@ export class DBSyncService {
     }
   }
 
+  private async replicateFromPostgres() {
+    const telemetryEntry = new DbSyncTelemetry(
+      this.telemetryService,
+      this.performanceService,
+      'medic',
+      'from',
+      this.getLastReplicationDate(),
+    );
+
+    try {
+      const sinceSeq = await this.getLastDownloadedSeqPostgres();
+      const result = await this.postgresReplicationService.replicateFrom(sinceSeq);
+      // Update with the server's sequence from response
+      if (result.last_seq) {
+        await this.setLastDownloadedSeqPostgres(result.last_seq);
+      }
+      telemetryEntry.recordSuccess(result);
+    } catch (err) {
+      telemetryEntry.recordFailure(err, this.knownOnlineState);
+      console.error('Error replicating from remote server (postgres)', err);
+      return err;
+    }
+  }
+
   private getCurrentSeq(): Promise<number> {
     return this.dbService.get().info().then(info => info.update_seq);
   }
 
-  private async getLastReplicatedSeq(): Promise<number> {
+  // Nairobi protocol sequence tracking (localStorage)
+  private getLastReplicatedSeq(): number {
+    return Number(window.localStorage.getItem(LAST_REPLICATED_SEQ_KEY)) || 0;
+  }
+
+  private setLastReplicatedSeq(sequence: number) {
+    if (!sequence) {
+      return;
+    }
+
+    window.localStorage.setItem(LAST_REPLICATED_SEQ_KEY, sequence.toString());
+  }
+
+  // Postgres protocol sequence tracking (PouchDB local docs)
+  private async getLastReplicatedSeqPostgres(): Promise<number> {
     try {
       const doc = await this.dbService.get().get(LAST_REPLICATED_SEQ_DOC_ID);
       return doc.seq || 0;
@@ -141,7 +297,7 @@ export class DBSyncService {
     }
   }
 
-  private async setLastReplicatedSeq(sequence: number) {
+  private async setLastReplicatedSeqPostgres(sequence: number) {
     if (!sequence) {
       return;
     }
@@ -159,11 +315,7 @@ export class DBSyncService {
     }
   }
 
-  private getLastReplicationDate() {
-    return window.localStorage.getItem(LAST_REPLICATED_DATE_KEY);
-  }
-
-  private async getLastDownloadedSeq(): Promise<number | undefined> {
+  private async getLastDownloadedSeqPostgres(): Promise<number | undefined> {
     try {
       const doc = await this.dbService.get().get(LAST_DOWNLOADED_SEQ_DOC_ID);
       return doc.seq;
@@ -173,7 +325,7 @@ export class DBSyncService {
     }
   }
 
-  private async setLastDownloadedSeq(seq: number) {
+  private async setLastDownloadedSeqPostgres(seq: number) {
     if (!seq) {
       return;
     }
@@ -189,6 +341,10 @@ export class DBSyncService {
         seq: seq
       });
     }
+  }
+
+  private getLastReplicationDate() {
+    return window.localStorage.getItem(LAST_REPLICATED_DATE_KEY);
   }
 
   private async syncMedic(replicateFromServer: boolean, successiveSyncs = 0) {
@@ -210,7 +366,10 @@ export class DBSyncService {
 
   private async getSyncState(hasErrors): Promise<SyncState> {
     const currentSeq = await this.getCurrentSeq();
-    const lastReplicatedSeq = await this.getLastReplicatedSeq();
+    const usePostgres = await this.getSyncProtocol();
+    const lastReplicatedSeq = usePostgres
+      ? await this.getLastReplicatedSeqPostgres()
+      : this.getLastReplicatedSeq();
 
     if (!hasErrors && (!this.canReplicateToServer || currentSeq === lastReplicatedSeq)) {
       return { to: SyncStatus.Success, from: SyncStatus.Success };
@@ -269,15 +428,15 @@ export class DBSyncService {
     }
 
     const telemetryEntry = new DbSyncTelemetry(this.telemetryService, this.performanceService, 'meta', 'sync');
-    //const remote = this.dbService.get({ meta: true, remote: true });
+    const remote = this.dbService.get({ meta: true, remote: true });
     const local = this.dbService.get({ meta: true });
     let currentSeq;
     return local
       .info()
       .then(info => currentSeq = info.update_seq)
       .then(() => Promise.all([
-        //local.replicate.to(remote),
-        //local.replicate.from(remote),
+        local.replicate.to(remote),
+        local.replicate.from(remote),
       ]))
       .then(([ push, pull ]) => {
         telemetryEntry.recordSuccess({ push, pull });

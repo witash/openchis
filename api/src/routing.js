@@ -79,6 +79,7 @@ const deployInfo = require('./services/deploy-info');
 const dbDocHandler = require('./controllers/db-doc');
 const extensionLibs = require('./controllers/extension-libs');
 const replication = require('./controllers/replication');
+const syncInfo = require('./controllers/sync-info');
 const app = express.Router({ strict: true });
 const asyncLocalStorage = require('./services/async-storage');
 const moment = require('moment');
@@ -708,6 +709,25 @@ app.post(
   authorization.handleAuthErrors,
   authorization.onlineUserPassThrough,
   replication.getDocIdsToDelete,
+);
+app.get(
+  '/api/v1/sync/info',
+  authorization.handleAuthErrors,
+  authorization.onlineUserPassThrough,
+  syncInfo.get,
+);
+app.post(
+  '/api/v1/sync/upgrade',
+  jsonParser,
+  authorization.handleAuthErrors,
+  authorization.onlineUserPassThrough,
+  syncInfo.postUpgradeSequence,
+);
+app.get(
+  '/api/v1/sync/upgrade-state',
+  authorization.handleAuthErrors,
+  authorization.onlineUserPassThrough,
+  syncInfo.getUpgradeState,
 );
 
 const metaRoutePrefix = `/${environment.db}-user-*"name"-meta/`;

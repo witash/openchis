@@ -7,6 +7,7 @@
   const utils = require('./utils');
   const purger = require('./purger');
   const initialReplicationLib = require('./initial-replication');
+  const postgresReplicationLib = require('./postgres-initial-replication');
   const offlineDdocs = require('./offline-ddocs');
 
   const ONLINE_ROLE = 'mm-online';
@@ -93,11 +94,24 @@
     return hasRole(userCtx, '_admin') || hasRole(userCtx, ONLINE_ROLE);
   };
 
+  const getSyncInfo = async () => {
+    try {
+      return await utils.fetchJSON('/api/v1/sync/info');
+    } catch (err) {
+      console.warn('Error fetching sync info, defaulting to Nairobi protocol', err);
+      return { usePostgresSync: false };
+    }
+  };
+
   const doInitialReplication = async (remoteDb, localDb, userCtx) => {
     const replicationStarted = performance.now();
-    // Polling the document count from the db.
-    await initialReplicationLib.replicate(remoteDb, localDb);
-    if (await initialReplicationLib.isReplicationNeeded(localDb, userCtx)) {
+
+    // Check which sync protocol to use
+    const syncInfo = await getSyncInfo();
+    const replicationLib = syncInfo.usePostgresSync ? postgresReplicationLib : initialReplicationLib;
+
+    await replicationLib.replicate(remoteDb, localDb);
+    if (await replicationLib.isReplicationNeeded(localDb, userCtx)) {
       throw new Error('Initial replication failed');
     }
     window.startupTimes.replication = performance.now() - replicationStarted;

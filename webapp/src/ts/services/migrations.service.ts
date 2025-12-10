@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core';
 
 import { DbService } from '@mm-services/db.service';
+import { TargetCheckpointerMigration } from '@mm-services/migrations/target-checkpointer.migration';
 
 @Injectable({
   providedIn: 'root'
@@ -8,21 +9,21 @@ import { DbService } from '@mm-services/db.service';
 export class MigrationsService {
   constructor(
     private dbService:DbService,
+    private targetCheckpointerMigration:TargetCheckpointerMigration,
   ) {
   }
 
   private runningMigrations;
-  // TargetCheckpointerMigration disabled - no longer needed with custom postgres sync
-  private migrations = [];
+  private migrations = [
+    this.targetCheckpointerMigration
+  ];
 
   private async run() {
-    /*
     for (const migration of this.migrations) {
       if (!await migration.hasRun(this.dbService) && await migration.run()) {
         await migration.setHasRun(this.dbService);
       }
     }
-   */
     this.runningMigrations = false;
   }
 

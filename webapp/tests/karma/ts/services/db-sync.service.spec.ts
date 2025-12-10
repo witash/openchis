@@ -15,9 +15,12 @@ import { PerformanceService } from '@mm-services/performance.service';
 import { TranslateService } from '@mm-services/translate.service';
 import { MigrationsService } from '@mm-services/migrations.service';
 import { ReplicationService } from '@mm-services/replication.service';
+import { PostgresReplicationService } from '@mm-services/postgres-replication.service';
+import { HttpClientTestingModule, HttpTestingController } from '@angular/common/http/testing';
 
 describe('DBSync service', () => {
   let service:DBSyncService;
+  let httpMock:HttpTestingController;
   let to;
   let isOnlineOnly;
   let userCtx;
@@ -124,6 +127,7 @@ describe('DBSync service', () => {
     replicationService = { replicateFrom: sinon.stub() };
 
     TestBed.configureTestingModule({
+      imports: [HttpClientTestingModule],
       providers: [
         { provide: DbService, useValue: { get: db } },
         { provide: SessionService, useValue: { isOnlineOnly, userCtx } },
@@ -137,13 +141,20 @@ describe('DBSync service', () => {
         { provide: CheckDateService, useValue: checkDateService },
         { provide: MigrationsService, useValue: migrationService },
         { provide: ReplicationService, useValue: replicationService },
+        { provide: PostgresReplicationService, useValue: { replicateFrom: sinon.stub(), replicateTo: sinon.stub() } },
       ]
     });
 
     service = TestBed.inject(DBSyncService);
+    httpMock = TestBed.inject(HttpTestingController);
+
+    // Pre-set the sync protocol to Nairobi (false) to avoid HTTP requests in tests
+    // This simulates the service having already fetched the sync info
+    (service as any).usePostgresSync = false;
   });
 
   afterEach(() => {
+    httpMock.verify();
     sinon.restore();
     clock.restore();
   });

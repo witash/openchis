@@ -1,11 +1,14 @@
+/**
+ * Postgres-based initial replication.
+ * This module handles the initial download of documents using the postgres sync protocol.
+ * It uses /api/v1/replication/changes endpoint which returns full documents from postgres.
+ */
 const utils = require('./utils');
-const { setUiStatus, displayTooManyDocsWarning } = require('./ui-status');
-
-let docIdsRevs;
-let remoteDocCount;
+const { setUiStatus } = require('./ui-status');
 
 const INITIAL_REPLICATION_LOG = '_local/initial-replication';
 const BATCH_SIZE = 100;
+
 
 const startInitialReplication = async (localDb) => {
   if (await getReplicationLog(localDb)) {
@@ -34,7 +37,7 @@ const completeInitialReplication = async (localDb) => {
   replicationLog.data_usage = replicationLog.start_data_usage &&
                               dbSyncEndData.app.rx - replicationLog.start_data_usage.app.rx;
 
-  console.info('Initial sync completed successfully in ' + (replicationLog.duration / 1000) + ' seconds');
+  console.info('Initial sync (postgres) completed successfully in ' + (replicationLog.duration / 1000) + ' seconds');
   if (replicationLog.data_usage) {
     console.info('Initial sync received ' + replicationLog.data_usage + 'B of data');
   }
@@ -48,68 +51,62 @@ const getDataUsage = () => {
   }
 };
 
-const getMissingDocIdsRevsPairs = async (localDb, remoteDocIdsRevs) => {
-  const localDocs = await getLocalDocList(localDb);
-  return remoteDocIdsRevs.filter(({ id, rev }) => !localDocs[id] || localDocs[id] !== rev);
-};
-
-const getDownloadList = async (localDb = true) => {
-  const response = await utils.fetchJSON('/api/v1/replication/get-ids');
-
-  docIdsRevs = await getMissingDocIdsRevsPairs(localDb, response.doc_ids_revs);
-  remoteDocCount = response.doc_ids_revs.length;
-
-  if (response.warn) {
-    await displayTooManyDocsWarning(response);
-  }
-};
-
-const getLocalDocList = async (localDb) => {
+const getLocalDocMap = async (localDb) => {
   const response = await localDb.allDocs();
-
   const localDocMap = {};
   response.rows.forEach(row => localDocMap[row.id] = row.value && row.value.rev);
   return localDocMap;
 };
 
-const getDocsBatch = async (remoteDb, localDb) => {
-  const batch = docIdsRevs.splice(0, BATCH_SIZE);
+const getChangesBatch = async (sinceSeq) => {
+  let url = `/api/v1/replication/changes?limit=${BATCH_SIZE}`;
+  if (sinceSeq) {
+    url += `&since=${sinceSeq}`;
+  }
+  return await utils.fetchJSON(url);
+};
 
-  if (!batch.length) {
-    return;
+const downloadDocs = async (localDb) => {
+  let currentSeq;
+  let totalDownloaded = 0;
+
+  setUiStatus('FETCH_INFO', { count: 0, total: '?' });
+
+  while (true) {
+    const { docs, last_seq } = await getChangesBatch(currentSeq);
+
+    if (!docs || docs.length === 0) {
+      break;
+    }
+
+    // Get local docs to filter out ones we already have with same rev
+    const localDocMap = await getLocalDocMap(localDb);
+    const docsToSave = docs.filter(doc => !localDocMap[doc._id] || localDocMap[doc._id] !== doc._rev);
+
+    if (docsToSave.length > 0) {
+      await localDb.bulkDocs(docsToSave, { new_edits: false });
+      totalDownloaded += docsToSave.length;
+    }
+
+    setUiStatus('FETCH_INFO', { count: totalDownloaded, total: totalDownloaded + (docs.length === BATCH_SIZE ? '+' : '') });
+
+    if (docs.length < BATCH_SIZE) {
+      break;
+    }
+
+    currentSeq = last_seq;
   }
 
-  const res = await remoteDb.bulkGet({ docs: batch, attachments: true, revs: true });
-  const docs = res.results
-    .map(result => result.docs && result.docs[0] && result.docs[0].ok)
-    .filter(doc => doc);
-  await localDb.bulkDocs(docs, { new_edits: false });
+  return totalDownloaded;
 };
 
-const downloadDocs = async (remoteDb, localDb) => {
-  setUiStatus('FETCH_INFO', { count: remoteDocCount - docIdsRevs.length, total: remoteDocCount });
-  do {
-    await getDocsBatch(remoteDb, localDb);
-    setUiStatus('FETCH_INFO', { count: remoteDocCount - docIdsRevs.length, total: remoteDocCount });
-  } while (docIdsRevs.length > 0);
-};
-
-const writeCheckpointers = async (remoteDb, localDb) => {
-  const localInfo = await localDb.info();
-  await localDb.replicate.to(remoteDb, {
-    since: localInfo.update_seq,
-  });
-};
-
-const replicate = async (remoteDb, localDb) => {
+const replicate = async (remoteDb, localDb) => { // eslint-disable-line no-unused-vars
   setUiStatus('LOAD_APP');
 
   await startInitialReplication(localDb);
 
   setUiStatus('POLL_REPLICATION');
-  await getDownloadList(localDb);
-  await downloadDocs(remoteDb, localDb);
-  await writeCheckpointers(remoteDb, localDb);
+  await downloadDocs(localDb);
 
   await completeInitialReplication(localDb);
 };
@@ -122,6 +119,7 @@ const getReplicationLog = async (localDb) => {
     return null;
   }
 };
+
 const isReplicationNeeded = async (localDb, userCtx) => {
   const requiredDocs = [
     '_design/medic-client',
