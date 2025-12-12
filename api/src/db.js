@@ -243,4 +243,64 @@ if (UNIT_TEST_ENV) {
   module.exports.saveDocToPostgres = (doc, options) => postgres.saveDocToPostgres(doc, module.exports.medic, options);
   module.exports.saveDocsToPostgresBatch = postgres.saveDocsToPostgresBatch;
   module.exports.saveUserToPostgres = postgres.saveUserToPostgres;
+
+  // Changes listener to copy documents from medic database to postgres
+  const startChangesListener = () => {
+    const feed = module.exports.medic.changes({
+      since: 0,
+      live: true,
+      include_docs: true
+    });
+
+    feed.on('change', async (change) => {
+      try {
+        if (!change.doc) {
+          return;
+        }
+
+        await postgres.saveDocToPostgres(change, module.exports.medic, { fetchAttachmentsFromCouchDB: true });
+      } catch (err) {
+        logger.error('Error copying document to postgres: %o', err);
+      }
+    });
+
+    feed.on('error', (err) => {
+      logger.error('Changes feed error: %o', err);
+    });
+
+    logger.info('Started CouchDB to Postgres changes listener');
+  };
+
+  // Start the changes listener
+  startChangesListener();
+
+  // Changes listener for _users database
+  const startUsersChangesListener = () => {
+    const feed = module.exports.users.changes({
+      since: 0,
+      live: true,
+      include_docs: true
+    });
+
+    feed.on('change', async (change) => {
+      try {
+        if (!change.doc) {
+          return;
+        }
+
+        await postgres.saveUserToPostgres(change);
+      } catch (err) {
+        logger.error('Error copying user document to postgres: %o', err);
+      }
+    });
+
+    feed.on('error', (err) => {
+      logger.error('Users changes feed error: %o', err);
+    });
+
+    logger.info('Started _users to Postgres changes listener');
+  };
+
+  // Start the users changes listener
+  startUsersChangesListener();
 }
