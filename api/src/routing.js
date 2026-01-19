@@ -317,7 +317,6 @@ app.get(`${routePrefix}privacy-policy`, privacyPolicyController.get);
 const ONLINE_ONLY_ENDPOINTS = [
   '_design/*db/_list/*list',
   '_design/*db/_show/*show',
-  '_design/*db/_view/*view',
   '_find{/*index}',
   '_explain{/*index}',
   '_index{/*index}',
@@ -352,7 +351,7 @@ const UNAUDITED_ENDPOINTS = [
   // see `changesHandler`, `allDocsHandler`, `bulkGetHandler`
   `${routePrefix}_design/*db/_list/*list`,
   `${routePrefix}_design/*db/_show/*show`,
-  `${routePrefix}_design/*db/_view/*view`,
+  //`${routePrefix}_design/*db/_view/*view`,
   // Interacting with mongo filters uses POST
   `${routePrefix}_find`,
   `${routePrefix}_explain`,
