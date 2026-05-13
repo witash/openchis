@@ -7,6 +7,7 @@ import { ReplicationService } from '@mm-services/replication.service';
 import { DbService } from '@mm-services/db.service';
 import { of, throwError } from 'rxjs';
 import { RulesEngineService } from '@mm-services/rules-engine.service';
+import { PgReplicationService } from '@mm-services/pg-replication.service';
 
 
 describe('ContactTypes service', () => {
@@ -16,6 +17,7 @@ describe('ContactTypes service', () => {
   let dbService;
   let http;
   let rulesEngineService;
+  let pgReplicationService;
 
   beforeEach(() => {
     http = {
@@ -30,6 +32,10 @@ describe('ContactTypes service', () => {
       bulkGet: sinon.stub(),
     };
     rulesEngineService = { monitorExternalChanges: sinon.stub() };
+    pgReplicationService = {
+      isEnabled: sinon.stub().returns(false),
+      replicateFrom: sinon.stub(),
+    };
 
     dbService = sinon.stub();
     dbService.withArgs().returns(localDb);
@@ -40,6 +46,7 @@ describe('ContactTypes service', () => {
         { provide: DbService, useValue: { get: dbService } },
         { provide: HttpClient, useValue: http },
         { provide: RulesEngineService, useValue: rulesEngineService },
+        { provide: PgReplicationService, useValue: pgReplicationService },
       ]
     });
 
@@ -476,6 +483,36 @@ describe('ContactTypes service', () => {
         } catch (err) {
           expect(err.message).to.equal('bulkdocserror2');
         }
+      });
+    });
+
+    describe('pg-sync feature flag', () => {
+      it('delegates to PgReplicationService when flag is enabled', async () => {
+        pgReplicationService.isEnabled.returns(true);
+        pgReplicationService.replicateFrom.resolves({ read_docs: 7 });
+
+        const result = await service.replicateFrom();
+
+        expect(result).to.deep.equal({ read_docs: 7 });
+        expect(pgReplicationService.replicateFrom.callCount).to.equal(1);
+        expect(http.get.callCount).to.equal(0);
+        expect(localDb.allDocs.callCount).to.equal(0);
+      });
+
+      it('runs legacy get-ids path when flag is disabled and never calls pg-sync', async () => {
+        pgReplicationService.isEnabled.returns(false);
+        localDb.allDocs.resolves({ rows: [] });
+        http.get.returns(of({ doc_ids_revs: [] }));
+
+        await service.replicateFrom();
+
+        expect(pgReplicationService.replicateFrom.callCount).to.equal(0);
+        expect(http.get.args).to.deep.equal([[
+          '/api/v1/replication/get-ids',
+          { responseType: 'json' },
+        ]]);
+        const pgSyncCalls = http.post.getCalls().filter(c => c.args[0] === '/api/v1/pg-sync');
+        expect(pgSyncCalls).to.have.length(0);
       });
     });
   });
