@@ -90,6 +90,43 @@ contact ID that authorizes the document) plus `contacts.lineage TEXT[]`
 when the user's contact ID is the doc's `subject`, or appears in the
 `lineage` of the contact named by `subject`.
 
+### Subject derivation
+
+`subject` is computed at mirror time (Task 1) from the CouchDB document.
+The canonical rule already exists in the CouchDB view at
+`ddocs/medic-db/medic/nouveau/docs_by_replication_key/index.js` — read
+that file and port the equivalent logic into `/couch2pg/`. In summary:
+
+- **Contact-type docs** (`person`, `clinic`, `health_center`,
+  `district_hospital`, `contact`): `subject = doc._id`. The contact is
+  authorized for itself and for any ancestor of itself.
+- **`data_record` (reports)**: `subject` is the patient/place the
+  report is about, resolved in this priority order:
+  `doc.patient_id` → `doc.fields.patient_id` → `doc.place_id` →
+  `doc.fields.place_id` → `doc.fields.patient_uuid` → `doc.contact._id`.
+  If none resolves, `subject = '_unassigned'`.
+- **`task`, `target` docs**: `subject = doc.owner` (or equivalent
+  owning-contact field — see the view for the exact rules).
+- **System docs** (`resources`, `branding`, `settings`, `form`,
+  `translations`, etc.): treat as global; the mirror may store them
+  with `subject = NULL` and the sync endpoint may return them
+  unconditionally. Out of scope for Task 1's first cut if not needed.
+
+If the view's logic and this summary disagree, the **view wins** —
+update PROJECT.md and proceed.
+
+### Existing implementations to model on
+
+- **`api/src/services/replication/authorization.js`** — the current
+  CouchDB-backed authorization logic. Task 2's pg-sync handler should
+  produce semantically equivalent results (modulo the PoC scope cuts).
+  Read it for the user→subjects resolution and the descendant rules.
+- **`ddocs/medic-db/medic/nouveau/docs_by_replication_key/index.js`** —
+  canonical `subject` derivation (see above).
+- **`~/medic/cht-sync/couch2pg`** — the structural model for Task 1
+  (change-feed tail, seq persistence, restart/resume). See Task 1 for
+  the access caveat.
+
 ## Schema
 
 `postgres-sync-setup.sql` is the schema source of truth for the PoC.
@@ -133,6 +170,20 @@ Task 4 (integration) runs last.
 ### Task 1 — couch2pg mirror worker
 
 **Branch:** `poc/task-1-couch2pg`
+
+**Reference implementation:** `~/medic/cht-sync/couch2pg` is an existing
+CouchDB-to-Postgres mirror. Use it as the model for change-feed tailing,
+seq persistence, restart/resume, and overall service shape. Do **not**
+copy it wholesale — the PoC schema and authorization needs (populating
+`subject`, maintaining `contacts.lineage[]`, cascading hierarchy moves)
+are PoC-specific and not present there.
+
+> **Access note for headless agents:** this path is outside the worktree
+> and outside the openchis repo. If the agent's sandbox blocks reads
+> there, stop and ask the user to either (a) symlink
+> `~/medic/cht-sync/couch2pg` into the worktree, or (b) add the path to
+> the agent's allowed reads. Do not proceed by guessing at the reference
+> design.
 
 A standalone Node service in `/couch2pg/` that:
 - Tails the CouchDB `_changes` feed continuously, persisting its position.
@@ -254,12 +305,53 @@ Runs after Tasks 1–3 are merged locally.
   recovery, but the final state should read as a clean single-task commit.
 - **Unit tests are the contract.** A task is not done until its unit
   tests pass. Integration verification is deferred to Task 4.
-- **Dev services are assumed running.** Agents do not start CouchDB or
-  Postgres. They read connection details from env vars:
-  - `COUCH_URL` — e.g. `http://admin:pass@localhost:5984`
-  - `POSTGRES_URL` — e.g. `postgres://user:pass@localhost:5432/medic`
-  If a service is unreachable, fail loudly with a clear message.
+- **No running services during unit-test work.** Tasks 1, 2, and 3 do
+  their work entirely against mocks. Unit tests must **not** require a
+  running CouchDB or Postgres:
+  - **Mock the Postgres client.** Use a fake/stub for `pg` (or whatever
+    driver the agent picks). Do not connect to a real database in unit
+    tests, even a local one.
+  - **Mock CouchDB.** Task 1 unit tests feed synthetic change-feed
+    payloads into the worker; they do not hit a real CouchDB. Task 3
+    unit tests mock `fetch`/HTTP and use an in-memory PouchDB.
+  - Connection details (`COUCH_URL`, `POSTGRES_URL`) are read from env
+    vars **only by production code paths**, exercised in Task 4
+    integration tests. Tasks 1–3 may reference these names but must not
+    depend on the services being up.
+  If an agent finds itself needing a live service to write a unit test,
+  that's a signal the test is the wrong shape — restructure with a
+  mock, or defer the coverage to Task 4.
 - **Schema changes flow through Task 2.** Task 1 and Task 3 must not
   edit `postgres-sync-setup.sql`. If they need a change, they leave a
   TODO in their own code and call it out in their commit message; Task 2
   incorporates the change.
+
+### Resuming after interruption
+
+Agents may be killed, hit context limits, or otherwise restart with no
+in-memory state. On-disk artefacts are the only durable record of
+progress. Every fresh-or-resumed agent invocation must run this protocol
+**before doing any new work**:
+
+1. `cd` into the task's worktree (`.agents/task-N-<name>/`).
+2. `cat TASK_STATE.md` if it exists — the prior agent's notes on what
+   was done, what's next, and any open questions or blockers.
+3. `git log --oneline -20` — checkpoint commits show the resume point.
+4. Run the task's unit test command. The set of passing vs. missing
+   vs. failing tests is the canonical "where am I" signal.
+5. Decide the next step from those three inputs. Update
+   `TASK_STATE.md` with what's now in progress before making changes.
+
+Conventions:
+
+- **`TASK_STATE.md`** is a per-worktree scratchpad. It is in
+  `.gitignore` and must not be committed. Keep it short: current step,
+  next step, blockers, open questions. Append as work proceeds; do not
+  rewrite history in it.
+- **Checkpoint commits** are encouraged at every coherent step (e.g.
+  "schema added", "changes-feed tail wired", "soft-delete tests green").
+  They exist to make resume cheap; they do not need polished messages.
+  The final task commit may squash them or leave them — Task 4 / the
+  user decides at merge time.
+- Tests are the contract. If unit tests pass, the task is done
+  regardless of what `TASK_STATE.md` says.
