@@ -3,6 +3,7 @@ import { lastValueFrom } from 'rxjs';
 import { DbService } from './db.service';
 import { HttpClient } from '@angular/common/http';
 import { RulesEngineService } from '@mm-services/rules-engine.service';
+import { PgReplicationService } from '@mm-services/pg-replication.service';
 
 @Injectable({
   providedIn: 'root'
@@ -12,12 +13,17 @@ export class ReplicationService {
     private dbService:DbService,
     private http:HttpClient,
     private rulesEngineService:RulesEngineService,
+    private pgReplicationService:PgReplicationService,
   ) {
   }
 
   private readonly BATCH_SIZE=100;
 
   async replicateFrom():Promise<{ read_docs: number }> {
+    if (this.pgReplicationService.isEnabled()) {
+      return this.pgReplicationService.replicateFrom();
+    }
+
     const remoteDocIdsRevs = await this.getRemoteDocs();
     const localDocs = await this.dbService.get().allDocs();
 
