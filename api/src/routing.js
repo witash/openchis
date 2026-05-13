@@ -81,6 +81,7 @@ const deployInfo = require('./services/deploy-info');
 const dbDocHandler = require('./controllers/db-doc');
 const extensionLibs = require('./controllers/extension-libs');
 const replication = require('./controllers/replication');
+const pgSync = require('./controllers/pg-sync');
 const app = express.Router({ strict: true });
 const asyncLocalStorage = require('./services/async-storage');
 const moment = require('moment');
@@ -928,6 +929,12 @@ app.post(
   authorization.handleAuthErrors,
   authorization.onlineUserPassThrough,
   replication.getDocIdsToDelete,
+);
+app.post(
+  '/api/v1/pg-sync',
+  jsonParser,
+  authorization.handleAuthErrors,
+  pgSync.getDocs,
 );
 
 const metaRoutePrefix = `/${environment.db}-user-*"name"-meta/`;
