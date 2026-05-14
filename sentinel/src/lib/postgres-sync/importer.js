@@ -236,7 +236,7 @@ const processBatch = async (pool, source, batch) => {
   } catch (err) {
     try {
       await client.query('ROLLBACK');
-    } catch (_rollbackErr) {
+    } catch {
       // ignore — propagate the original error
     }
     throw err;

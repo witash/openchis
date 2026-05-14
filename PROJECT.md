@@ -61,8 +61,9 @@ client write → PouchDB (local) → replication → CouchDB
 
 ### Code Locations
 
-- **`/couch2pg/`** — standalone Node service. Houses the changes-feed
-  mirror worker; not part of api/sentinel.
+- **`/sentinel/src/lib/postgres-sync/`** — the changes-feed mirror worker.
+  Runs inside the sentinel process, independently of sentinel's existing
+  transition / scheduled-task loops.
 - **`/api/`** — the existing API server hosts the new `pg-sync` endpoint
   alongside its current routes.
 - **`/webapp/`** — the offline client is patched here, behind a feature
@@ -94,8 +95,9 @@ when the user's contact ID is the doc's `subject`, or appears in the
 
 `subject` is computed at mirror time from the CouchDB document.
 The canonical rule already exists in the CouchDB view at
-`ddocs/medic-db/medic/nouveau/docs_by_replication_key/index.js` — read
-that file and port the equivalent logic into `/couch2pg/`. In summary:
+`ddocs/medic-db/medic/nouveau/docs_by_replication_key/index.js` — that
+file is the source of truth; the mirror's `transform.js` ports the
+equivalent logic. In summary:
 
 - **Contact-type docs** (`person`, `clinic`, `health_center`,
   `district_hospital`, `contact`): `subject = doc._id`. The contact is

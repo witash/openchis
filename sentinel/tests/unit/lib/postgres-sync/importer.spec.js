@@ -1,7 +1,6 @@
-require('../common');
 const sinon = require('sinon');
 
-const importer = require('../../src/importer');
+const importer = require('../../../../src/lib/postgres-sync/importer');
 
 const containsSubstr = (substr) => sinon.match((value) => typeof value === 'string' && value.includes(substr));
 const matchBegin = () => sinon.match.string.and(sinon.match((v) => v === 'BEGIN'));
@@ -17,8 +16,6 @@ const matchUpsertContact = () => containsSubstr('INSERT INTO contacts');
 const matchUpdateLineage = () => containsSubstr('UPDATE contacts SET lineage');
 const matchDeleteContact = () => containsSubstr('DELETE FROM contacts');
 
-const findCall = (stub, matcher) => stub.getCalls().find((c) => matcher.test(c.args[0]));
-
 const makeClient = () => {
   const query = sinon.stub().resolves({ rows: [] });
   return {
@@ -31,7 +28,7 @@ const makePool = (client) => ({
   connect: sinon.stub().resolves(client),
 });
 
-describe('importer', () => {
+describe('postgres-sync importer', () => {
   let client;
   let pool;
 
@@ -68,6 +65,19 @@ describe('importer', () => {
       expect(client.release.callCount).to.equal(1);
     });
 
+    it('swallows a failing ROLLBACK and still propagates the original error', async () => {
+      client.query.withArgs(matchInsertDoc()).rejects(new Error('disk full'));
+      client.query.withArgs(matchRollback()).rejects(new Error('connection dead'));
+
+      await expect(
+        importer.processBatch(pool, 'host/db', {
+          results: [{ id: 'd1', doc: { _id: 'd1', _rev: '1-a', type: 'data_record' } }],
+          last_seq: 5,
+        })
+      ).to.eventually.be.rejectedWith('disk full');
+      expect(client.release.callCount).to.equal(1);
+    });
+
     it('persists last_seq once at the end of the batch', async () => {
       await importer.processBatch(pool, 'host/db', {
         results: [
@@ -80,6 +90,18 @@ describe('importer', () => {
       const upserts = client.query.withArgs(matchUpsertProgress());
       expect(upserts.callCount).to.equal(1);
       expect(upserts.firstCall.args[1]).to.deep.equal(['host/db', '42-abc']);
+    });
+
+    it('does not upsert progress when last_seq is missing', async () => {
+      await importer.processBatch(pool, 'host/db', { results: [] });
+
+      expect(client.query.withArgs(matchUpsertProgress()).callCount).to.equal(0);
+    });
+
+    it('coerces a null seq via saveProgress to the string "0"', async () => {
+      await importer.saveProgress(client, 'host/db', null);
+      const call = client.query.withArgs(matchUpsertProgress()).firstCall;
+      expect(call.args[1]).to.deep.equal(['host/db', '0']);
     });
   });
 
@@ -209,6 +231,22 @@ describe('importer', () => {
       expect(upsertContact.args[1][3]).to.equal(null); // parent
       expect(upsertContact.args[1][4]).to.deep.equal([]); // lineage
     });
+
+    it('stamps muted as a Date when present', async () => {
+      const mutedAt = '2024-05-01T12:00:00Z';
+      const change = {
+        id: 'p1',
+        seq: 13,
+        doc: { _id: 'p1', _rev: '1', type: 'person', muted: mutedAt },
+      };
+      client.query.withArgs(matchSelectContact(), ['p1']).resolves({ rows: [] });
+
+      await importer.processBatch(pool, 'host/db', { results: [change], last_seq: 13 });
+
+      const upsertContact = client.query.withArgs(matchUpsertContact()).firstCall;
+      expect(upsertContact.args[1][6]).to.be.instanceOf(Date);
+      expect(upsertContact.args[1][6].toISOString()).to.equal('2024-05-01T12:00:00.000Z');
+    });
   });
 
   describe('processBatch — doc update (new _rev)', () => {
@@ -263,6 +301,30 @@ describe('importer', () => {
       const deleteContact = client.query.withArgs(matchDeleteContact()).firstCall;
       expect(deleteContact).to.exist;
       expect(deleteContact.args[1]).to.deep.equal(['doc-1']);
+    });
+
+    it('uses doc._rev as the tombstone rev when changes[] is missing', async () => {
+      const change = {
+        id: 'doc-1',
+        seq: 7,
+        deleted: true,
+        doc: { _id: 'doc-1', _rev: '3-via-doc' },
+      };
+
+      await importer.processBatch(pool, 'host/db', { results: [change], last_seq: 7 });
+
+      const insertCall = client.query.withArgs(matchInsertDoc()).firstCall;
+      expect(insertCall.args[1][1]).to.equal('3-via-doc');
+    });
+
+    it('falls back to a zero rev when neither changes[] nor doc._rev are present', async () => {
+      const change = { id: 'doc-1', deleted: true };
+
+      await importer.processBatch(pool, 'host/db', { results: [change], last_seq: 7 });
+
+      const insertCall = client.query.withArgs(matchInsertDoc()).firstCall;
+      expect(insertCall.args[1][1]).to.equal('0');
+      expect(insertCall.args[1][2]).to.equal(null);
     });
 
     it('does not look up the contact table for a deletion', async () => {
@@ -330,11 +392,6 @@ describe('importer', () => {
 
   describe('processBatch — hierarchy move cascade', () => {
     it('cascades lineage to descendants when a contact reparents', async () => {
-      // Existing state:
-      //   A2 is a new root with lineage []
-      //   B (the moving contact) currently has lineage [A]
-      //   C is B's child with lineage [B, A]
-      // The change moves B from parent A to parent A2.
       const change = {
         id: 'B',
         seq: 50,
@@ -355,18 +412,15 @@ describe('importer', () => {
 
       await importer.processBatch(pool, 'host/db', { results: [change], last_seq: 50 });
 
-      // B is upserted with its new lineage.
       const upsertCall = client.query.withArgs(matchUpsertContact()).firstCall;
       expect(upsertCall.args[1][4]).to.deep.equal(['A2']);
 
-      // C's lineage is rewritten.
       const updateCall = client.query.withArgs(matchUpdateLineage()).firstCall;
       expect(updateCall).to.exist;
       expect(updateCall.args[1]).to.deep.equal([['B', 'A2'], 'C']);
     });
 
     it('updates deep descendants correctly when an intermediate contact moves', async () => {
-      // A -> B -> C -> D becomes A2 -> B -> C -> D
       const change = {
         id: 'B',
         seq: 51,
@@ -412,6 +466,27 @@ describe('importer', () => {
       expect(client.query.withArgs(matchUpdateLineage()).callCount).to.equal(0);
       expect(client.query.withArgs(matchUpdateSubject()).callCount).to.equal(0);
     });
+
+    it('skips descendants whose lineage no longer contains the pivot', async () => {
+      const change = {
+        id: 'B',
+        seq: 53,
+        doc: { _id: 'B', _rev: '8-move', type: 'health_center', parent: { _id: 'A2' } },
+      };
+
+      client.query.withArgs(matchSelectContact(), ['A2'])
+        .resolves({ rows: [{ id: 'A2', parent: null, lineage: [] }] });
+      client.query.withArgs(matchSelectContact(), ['B'])
+        .resolves({ rows: [{ id: 'B', parent: 'A', lineage: ['A'] }] });
+      // A descendant row whose lineage no longer mentions B should be left alone.
+      client.query.withArgs(matchSelectDescendants(), ['B']).resolves({
+        rows: [{ id: 'stale', lineage: ['Z'] }],
+      });
+
+      await importer.processBatch(pool, 'host/db', { results: [change], last_seq: 53 });
+
+      expect(client.query.withArgs(matchUpdateLineage()).callCount).to.equal(0);
+    });
   });
 
   describe('getProgress / saveProgress — resume after restart', () => {
@@ -435,7 +510,6 @@ describe('importer', () => {
     });
 
     it('resumes from the persisted seq across a simulated restart', async () => {
-      // "Run 1": process a batch and advance last_seq to '100-x'.
       await importer.processBatch(pool, 'host/db', {
         results: [{ id: 'd1', doc: { _id: 'd1', _rev: '1-a', type: 'data_record' } }],
         last_seq: '100-x',
@@ -443,16 +517,21 @@ describe('importer', () => {
       const firstUpsert = client.query.withArgs(matchUpsertProgress()).firstCall;
       expect(firstUpsert.args[1]).to.deep.equal(['host/db', '100-x']);
 
-      // "Restart": new pool, new client. The progress row survived.
       const restartedClient = makeClient();
       restartedClient.query.withArgs(matchSelectProgress())
         .resolves({ rows: [{ seq: '100-x' }] });
       const restartedPool = makePool(restartedClient);
 
-      // The next call retrieves the persisted seq before requesting changes.
       const bootstrapClient = await restartedPool.connect();
       const since = await importer.getProgress(bootstrapClient, 'host/db');
       expect(since).to.equal('100-x');
+    });
+  });
+
+  describe('computeLineageForParent', () => {
+    it('returns an empty lineage for a missing parent id', async () => {
+      expect(await importer.computeLineageForParent(client, null)).to.deep.equal([]);
+      expect(await importer.computeLineageForParent(client, undefined)).to.deep.equal([]);
     });
   });
 
