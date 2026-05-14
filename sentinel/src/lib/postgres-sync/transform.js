@@ -120,7 +120,7 @@ const getSubject = (doc) => {
     case 'data_record':
       return getDataRecordSubject(doc) || '_unassigned';
     case 'task':
-      // The view keys tasks by `doc.user`. PROJECT.md says "view wins".
+    // The view keys tasks by `doc.user`. PROJECT.md says "view wins".
       return doc.user || null;
     case 'target':
       return doc.owner || null;

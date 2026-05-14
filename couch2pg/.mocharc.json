@@ -1,6 +1,0 @@
-{
-  "spec": ["tests/unit/**/*.spec.js"],
-  "recursive": true,
-  "require": ["tests/common.js"],
-  "timeout": 5000
-}
