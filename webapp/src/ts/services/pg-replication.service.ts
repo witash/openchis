@@ -5,19 +5,22 @@ import { HttpClient } from '@angular/common/http';
 import { DbService } from '@mm-services/db.service';
 import { RulesEngineService } from '@mm-services/rules-engine.service';
 
-// PoC feature flag: when 'true', offline-client download flows through
-// /api/v1/pg-sync instead of the legacy get-ids / Nairobi path.
-// Stored in localStorage (per-device, survives restarts, no async load).
-const FLAG_KEY = 'medic-pg-sync-enabled';
-const LAST_SEQ_KEY = 'medic-pg-sync-last-seq';
-const CUTOVER_KEY = 'medic-pg-sync-cutover-done';
-
+// Per-device pg-sync state. PouchDB `_local/` docs are not replicated and have
+// no revision history; this keeps the cursor scoped to the current PouchDB
+// (i.e. the signed-in user) rather than to the browser origin like
+// localStorage would.
+const STATE_DOC_ID = '_local/medic-pg-sync-state';
 const PG_SYNC_URL = '/api/v1/pg-sync';
-const PG_SYNC_CUTOVER_URL = '/api/v1/pg-sync/cutover';
 
 interface PgSyncResponse {
   docs: any[];
   last_seq: number | string;
+}
+
+interface PgSyncStateDoc {
+  _id: string;
+  _rev?: string;
+  last_seq?: number | string;
 }
 
 @Injectable({
@@ -30,40 +33,29 @@ export class PgReplicationService {
     private rulesEngineService: RulesEngineService,
   ) {}
 
-  isEnabled(): boolean {
-    return window.localStorage.getItem(FLAG_KEY) === 'true';
-  }
-
-  private getLastSeq(): number | string {
-    const raw = window.localStorage.getItem(LAST_SEQ_KEY);
-    if (raw === null || raw === undefined) {
-      return 0;
+  private async getStateDoc(): Promise<PgSyncStateDoc> {
+    try {
+      return await this.dbService.get().get(STATE_DOC_ID);
+    } catch (err) {
+      if (err && err.status === 404) {
+        return { _id: STATE_DOC_ID };
+      }
+      throw err;
     }
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : raw;
   }
 
-  private setLastSeq(seq) {
+  private async setLastSeq(existing: PgSyncStateDoc, seq) {
     if (seq === undefined || seq === null) {
       return;
     }
-    window.localStorage.setItem(LAST_SEQ_KEY, String(seq));
-  }
-
-  private isCutoverDone(): boolean {
-    return window.localStorage.getItem(CUTOVER_KEY) === 'true';
-  }
-
-  private markCutoverDone() {
-    window.localStorage.setItem(CUTOVER_KEY, 'true');
+    const next: PgSyncStateDoc = { ...existing, last_seq: seq };
+    await this.dbService.get().put(next);
   }
 
   async replicateFrom(): Promise<{ read_docs: number }> {
-    if (!this.isCutoverDone()) {
-      await this.recordCutover();
-    }
+    const state = await this.getStateDoc();
+    const since = state.last_seq ?? 0;
 
-    const since = this.getLastSeq();
     const response = await this.fetchPgSync(since);
     const docs = Array.isArray(response?.docs) ? response.docs : [];
 
@@ -71,17 +63,8 @@ export class PgReplicationService {
       await this.applyDocs(docs);
     }
 
-    this.setLastSeq(response.last_seq);
+    await this.setLastSeq(state, response.last_seq);
     return { read_docs: docs.length };
-  }
-
-  private async recordCutover() {
-    const info = await this.dbService.get().info();
-    const body = { pouchdb_seq: info?.update_seq ?? null };
-    await lastValueFrom(
-      this.http.post(PG_SYNC_CUTOVER_URL, body, { responseType: 'json' })
-    );
-    this.markCutoverDone();
   }
 
   private async fetchPgSync(since): Promise<PgSyncResponse> {

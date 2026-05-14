@@ -8,9 +8,7 @@ import { PgReplicationService } from '@mm-services/pg-replication.service';
 import { DbService } from '@mm-services/db.service';
 import { RulesEngineService } from '@mm-services/rules-engine.service';
 
-const FLAG_KEY = 'medic-pg-sync-enabled';
-const LAST_SEQ_KEY = 'medic-pg-sync-last-seq';
-const CUTOVER_KEY = 'medic-pg-sync-cutover-done';
+const STATE_DOC_ID = '_local/medic-pg-sync-state';
 
 describe('PgReplicationService', () => {
   let service: PgReplicationService;
@@ -22,13 +20,15 @@ describe('PgReplicationService', () => {
 
   /**
    * Minimal in-memory PouchDB-shaped harness. Models the calls our service
-   * makes — bulkDocs (with new_edits:false), get, info — well enough to
+   * makes — bulkDocs (with new_edits:false), get, put — well enough to
    * verify the "doc lands and is readable / tombstone makes get reject"
-   * contract in PROJECT.md without pulling a real PouchDB into karma.
+   * contract in PROJECT.md and to back the `_local/` per-device cursor
+   * without pulling a real PouchDB into karma.
    */
   const buildLocalDb = () => {
     docStore = new Map();
     let updateSeq = 0;
+    let localRevCounter = 0;
 
     return {
       info: sinon.stub().callsFake(() => Promise.resolve({ update_seq: updateSeq })),
@@ -40,7 +40,14 @@ describe('PgReplicationService', () => {
           err.name = 'not_found';
           return Promise.reject(err);
         }
-        return Promise.resolve(doc);
+        return Promise.resolve({ ...doc });
+      }),
+      put: sinon.stub().callsFake((doc) => {
+        // mirrors PouchDB's local-doc rev bump
+        localRevCounter += 1;
+        const stored = { ...doc, _rev: `0-${localRevCounter}` };
+        docStore.set(doc._id, stored);
+        return Promise.resolve({ ok: true, id: doc._id, rev: stored._rev });
       }),
       bulkDocs: sinon.stub().callsFake((docs) => {
         const results: any[] = [];
@@ -55,29 +62,10 @@ describe('PgReplicationService', () => {
         });
         return Promise.resolve(results);
       }),
-      remove: sinon.stub().callsFake((id, rev) => {
-        const doc = docStore.get(id);
-        if (!doc || doc._deleted) {
-          const err: any = new Error('missing');
-          err.status = 404;
-          return Promise.reject(err);
-        }
-        updateSeq += 1;
-        docStore.set(id, { _id: id, _rev: rev, _deleted: true });
-        return Promise.resolve({ ok: true, id, rev });
-      }),
     };
   };
 
-  const clearStorage = () => {
-    window.localStorage.removeItem(FLAG_KEY);
-    window.localStorage.removeItem(LAST_SEQ_KEY);
-    window.localStorage.removeItem(CUTOVER_KEY);
-  };
-
   beforeEach(() => {
-    clearStorage();
-
     http = {
       get: sinon.stub(),
       post: sinon.stub(),
@@ -101,32 +89,10 @@ describe('PgReplicationService', () => {
 
   afterEach(() => {
     sinon.restore();
-    clearStorage();
-  });
-
-  describe('isEnabled', () => {
-    it('returns false when localStorage flag is unset', () => {
-      expect(service.isEnabled()).to.equal(false);
-    });
-
-    it('returns true when localStorage flag is "true"', () => {
-      window.localStorage.setItem(FLAG_KEY, 'true');
-      expect(service.isEnabled()).to.equal(true);
-    });
-
-    it('returns false for any non-"true" value', () => {
-      window.localStorage.setItem(FLAG_KEY, '1');
-      expect(service.isEnabled()).to.equal(false);
-      window.localStorage.setItem(FLAG_KEY, 'yes');
-      expect(service.isEnabled()).to.equal(false);
-    });
   });
 
   describe('replicateFrom — initial sync', () => {
-    it('POSTs since=0 on first run, lands docs locally, persists last_seq, marks cutover', async () => {
-      // Cutover endpoint
-      http.post.withArgs('/api/v1/pg-sync/cutover').returns(of({ ok: true }));
-      // pg-sync endpoint
+    it('POSTs since=0 on first run, lands docs locally, persists last_seq in _local/ doc', async () => {
       const docs = [
         { _id: 'a', _rev: '1-abc', value: 1 },
         { _id: 'b', _rev: '1-def', value: 2 },
@@ -137,7 +103,7 @@ describe('PgReplicationService', () => {
 
       expect(result).to.deep.equal({ read_docs: 2 });
 
-      // since=0 sent
+      // since=0 sent (no prior _local/ doc)
       const pgCall = http.post.getCalls().find(c => c.args[0] === '/api/v1/pg-sync');
       expect(pgCall.args[1]).to.deep.equal({ since: 0 });
       expect(pgCall.args[2]).to.deep.equal({ responseType: 'json' });
@@ -151,48 +117,38 @@ describe('PgReplicationService', () => {
       const fetchedB = await localDb.get('b');
       expect(fetchedB).to.deep.include({ _id: 'b', value: 2 });
 
-      // last_seq persisted
-      expect(window.localStorage.getItem(LAST_SEQ_KEY)).to.equal('42');
-      // cutover marked
-      expect(window.localStorage.getItem(CUTOVER_KEY)).to.equal('true');
+      // last_seq persisted in _local/ doc
+      const state = await localDb.get(STATE_DOC_ID);
+      expect(state.last_seq).to.equal(42);
 
       // rules engine notified about non-deleted docs
       expect(rulesEngineService.monitorExternalChanges.args).to.deep.equal([[{ docs }]]);
     });
 
-    it('records cutover with current PouchDB update_seq on first run only', async () => {
-      const cutoverPosts: any[] = [];
-      http.post.withArgs('/api/v1/pg-sync/cutover').callsFake((url, body) => {
-        cutoverPosts.push(body);
-        return of({ ok: true });
-      });
+    it('does not POST a cutover endpoint', async () => {
       http.post.withArgs('/api/v1/pg-sync').returns(of({ docs: [], last_seq: 5 }));
-
-      // simulate prior pouch state for the cutover seq
-      await localDb.bulkDocs([{ _id: 'preexisting', _rev: '1-x', f: 1 }]);
-
-      await service.replicateFrom();
-
-      expect(cutoverPosts).to.have.length(1);
-      expect(cutoverPosts[0]).to.deep.equal({ pouchdb_seq: 1 });
-
-      // second sync should NOT re-cutover
-      http.post.resetHistory();
-      http.post.withArgs('/api/v1/pg-sync/cutover').returns(of({ ok: true }));
-      http.post.withArgs('/api/v1/pg-sync').returns(of({ docs: [], last_seq: 9 }));
 
       await service.replicateFrom();
 
       const cutoverCalls = http.post.getCalls().filter(c => c.args[0] === '/api/v1/pg-sync/cutover');
       expect(cutoverCalls).to.have.length(0);
     });
+
+    it('does not read or write any pg-sync state from localStorage', async () => {
+      const localStorageBefore = { ...window.localStorage };
+      http.post.withArgs('/api/v1/pg-sync').returns(of({ docs: [], last_seq: 7 }));
+
+      await service.replicateFrom();
+
+      const localStorageAfter = { ...window.localStorage };
+      expect(localStorageAfter).to.deep.equal(localStorageBefore);
+    });
   });
 
   describe('replicateFrom — incremental sync', () => {
     it('sends since equal to previously persisted last_seq and only writes newer docs', async () => {
-      // simulate prior successful sync
-      window.localStorage.setItem(CUTOVER_KEY, 'true');
-      window.localStorage.setItem(LAST_SEQ_KEY, '17');
+      // simulate prior successful sync persisted to _local/
+      await localDb.put({ _id: STATE_DOC_ID, last_seq: 17 });
       // seed an "older" doc as already-present locally; sync should not re-fetch it
       await localDb.bulkDocs([{ _id: 'older', _rev: '1-old', value: 0 }]);
       localDb.bulkDocs.resetHistory();
@@ -213,13 +169,14 @@ describe('PgReplicationService', () => {
       const older = await localDb.get('older');
       expect(older).to.deep.include({ _id: 'older', value: 0 });
 
-      // last_seq advanced
-      expect(window.localStorage.getItem(LAST_SEQ_KEY)).to.equal('25');
+      // last_seq advanced in _local/ state
+      const state = await localDb.get(STATE_DOC_ID);
+      expect(state.last_seq).to.equal(25);
     });
 
     it('skips bulkDocs entirely when server returns no docs', async () => {
-      window.localStorage.setItem(CUTOVER_KEY, 'true');
-      window.localStorage.setItem(LAST_SEQ_KEY, '50');
+      await localDb.put({ _id: STATE_DOC_ID, last_seq: 50 });
+      localDb.bulkDocs.resetHistory();
       http.post.withArgs('/api/v1/pg-sync').returns(of({ docs: [], last_seq: 50 }));
 
       const result = await service.replicateFrom();
@@ -232,7 +189,7 @@ describe('PgReplicationService', () => {
 
   describe('replicateFrom — tombstones', () => {
     it('removes deleted docs locally; pouch.get rejects with not-found after', async () => {
-      window.localStorage.setItem(CUTOVER_KEY, 'true');
+      await localDb.put({ _id: STATE_DOC_ID, last_seq: 10 });
       // seed the doc that the server will tombstone
       await localDb.bulkDocs([{ _id: 'doomed', _rev: '1-aa', value: 1 }]);
       localDb.bulkDocs.resetHistory();
@@ -260,7 +217,7 @@ describe('PgReplicationService', () => {
     });
 
     it('handles a mix of upserts and tombstones in a single response', async () => {
-      window.localStorage.setItem(CUTOVER_KEY, 'true');
+      await localDb.put({ _id: STATE_DOC_ID, last_seq: 10 });
       await localDb.bulkDocs([{ _id: 'old', _rev: '1-x', value: 1 }]);
       localDb.bulkDocs.resetHistory();
 
@@ -288,15 +245,29 @@ describe('PgReplicationService', () => {
     });
   });
 
-  describe('replicateFrom — last_seq persistence across restarts', () => {
+  describe('replicateFrom — _local/ doc semantics', () => {
+    it('does not write the _local/ doc to the changes feed (uses _local/ prefix)', async () => {
+      http.post.withArgs('/api/v1/pg-sync').returns(of({ docs: [], last_seq: 9 }));
+
+      await service.replicateFrom();
+
+      // The put call must target a _local/-prefixed doc id so PouchDB does
+      // not replicate it.
+      const putCalls = localDb.put.getCalls();
+      expect(putCalls.some(c => typeof c.args[0]._id === 'string' && c.args[0]._id.startsWith('_local/')))
+        .to.equal(true);
+      expect(putCalls.every(c => c.args[0]._id.startsWith('_local/')))
+        .to.equal(true);
+    });
+
     it('next sync after a simulated app restart uses the persisted last_seq as since', async () => {
       // first sync
-      http.post.withArgs('/api/v1/pg-sync/cutover').returns(of({ ok: true }));
       http.post.withArgs('/api/v1/pg-sync').returns(of({ docs: [], last_seq: 123 }));
       await service.replicateFrom();
-      expect(window.localStorage.getItem(LAST_SEQ_KEY)).to.equal('123');
+      const state = await localDb.get(STATE_DOC_ID);
+      expect(state.last_seq).to.equal(123);
 
-      // simulate restart — fresh TestBed/service, localStorage survives
+      // simulate restart — fresh TestBed/service, PouchDB (docStore) survives
       TestBed.resetTestingModule();
       TestBed.configureTestingModule({
         providers: [
@@ -319,8 +290,8 @@ describe('PgReplicationService', () => {
 
   describe('replicateFrom — failure semantics', () => {
     it('does not advance last_seq when the pg-sync HTTP call fails', async () => {
-      window.localStorage.setItem(CUTOVER_KEY, 'true');
-      window.localStorage.setItem(LAST_SEQ_KEY, '60');
+      await localDb.put({ _id: STATE_DOC_ID, last_seq: 60 });
+      localDb.bulkDocs.resetHistory();
       http.post.withArgs('/api/v1/pg-sync').returns(throwError(() => new Error('network down')));
 
       let caught;
@@ -333,14 +304,14 @@ describe('PgReplicationService', () => {
       expect(caught.message).to.equal('network down');
 
       // last_seq unchanged
-      expect(window.localStorage.getItem(LAST_SEQ_KEY)).to.equal('60');
+      const state = await localDb.get(STATE_DOC_ID);
+      expect(state.last_seq).to.equal(60);
       // nothing written locally
       expect(localDb.bulkDocs.callCount).to.equal(0);
     });
 
     it('does not advance last_seq when bulkDocs fails mid-sync', async () => {
-      window.localStorage.setItem(CUTOVER_KEY, 'true');
-      window.localStorage.setItem(LAST_SEQ_KEY, '60');
+      await localDb.put({ _id: STATE_DOC_ID, last_seq: 60 });
 
       http.post.withArgs('/api/v1/pg-sync').returns(of({
         docs: [{ _id: 'a', _rev: '1-aa', v: 1 }],
@@ -357,26 +328,8 @@ describe('PgReplicationService', () => {
       expect(caught).to.exist;
       expect(caught.message).to.equal('bulk fail');
 
-      expect(window.localStorage.getItem(LAST_SEQ_KEY)).to.equal('60');
-    });
-
-    it('does not mark cutover done when the cutover POST fails', async () => {
-      http.post.withArgs('/api/v1/pg-sync/cutover').returns(throwError(() => new Error('cutover failed')));
-      http.post.withArgs('/api/v1/pg-sync').returns(of({ docs: [], last_seq: 1 }));
-
-      let caught;
-      try {
-        await service.replicateFrom();
-      } catch (err) {
-        caught = err;
-      }
-      expect(caught).to.exist;
-      expect(caught.message).to.equal('cutover failed');
-
-      expect(window.localStorage.getItem(CUTOVER_KEY)).to.equal(null);
-      // pg-sync was not called because cutover threw first
-      const pgCall = http.post.getCalls().find(c => c.args[0] === '/api/v1/pg-sync');
-      expect(pgCall).to.equal(undefined);
+      const state = await localDb.get(STATE_DOC_ID);
+      expect(state.last_seq).to.equal(60);
     });
   });
 });

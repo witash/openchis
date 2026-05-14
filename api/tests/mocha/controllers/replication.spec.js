@@ -3,6 +3,7 @@ const sinon = require('sinon');
 const controller = require('../../../src/controllers/replication');
 const replicationService = require('../../../src/services/replication/replication');
 const serverUtils = require('../../../src/server-utils');
+const config = require('../../../src/config');
 
 let req;
 let res;
@@ -11,6 +12,7 @@ describe('Initial Replication controller', () => {
   beforeEach(() => {
     req = Object.freeze({ userCtx: { name: 'michael' } });
     res = { json: sinon.stub() };
+    sinon.stub(config, 'get').returns(undefined);
   });
 
   afterEach(() => {
@@ -107,6 +109,59 @@ describe('Initial Replication controller', () => {
       expect(replicationService.getContext.callCount).to.equal(1);
       expect(serverUtils.serverError.args).to.deep.equal([[ { status: 502 }, req, res ]]);
       expect(res.json.callCount).to.equal(0);
+    });
+
+    describe('pg_sync feature flag', () => {
+      it('returns { use_pg_sync: true } and skips the legacy enumeration when enabled', async () => {
+        config.get.withArgs('pg_sync').returns({ enabled: true });
+        sinon.stub(replicationService, 'getContext');
+        sinon.stub(replicationService, 'getDocIdsRevPairs');
+
+        await controller.getDocIds(req, res);
+
+        expect(res.json.args).to.deep.equal([[{ use_pg_sync: true }]]);
+        expect(replicationService.getContext.callCount).to.equal(0);
+        expect(replicationService.getDocIdsRevPairs.callCount).to.equal(0);
+      });
+
+      it('returns the legacy payload when pg_sync is present but disabled', async () => {
+        config.get.withArgs('pg_sync').returns({ enabled: false });
+        sinon.stub(replicationService, 'getContext').resolves({
+          docIds: [1],
+          warnDocIds: [],
+          lastSeq: '1-x',
+          warn: false,
+          limit: 1000,
+        });
+        sinon.stub(replicationService, 'getDocIdsRevPairs').resolves([{ id: 1, rev: 1 }]);
+
+        await controller.getDocIds(req, res);
+
+        expect(res.json.args).to.deep.equal([[{
+          doc_ids_revs: [{ id: 1, rev: 1 }],
+          warn_docs: 0,
+          last_seq: '1-x',
+          warn: false,
+          limit: 1000,
+        }]]);
+      });
+
+      it('returns the legacy payload when pg_sync setting is missing', async () => {
+        config.get.withArgs('pg_sync').returns(undefined);
+        sinon.stub(replicationService, 'getContext').resolves({
+          docIds: [1],
+          warnDocIds: [],
+          lastSeq: '1-x',
+          warn: false,
+          limit: 1000,
+        });
+        sinon.stub(replicationService, 'getDocIdsRevPairs').resolves([{ id: 1, rev: 1 }]);
+
+        await controller.getDocIds(req, res);
+
+        expect(res.json.args[0][0]).to.have.property('doc_ids_revs');
+        expect(res.json.args[0][0]).to.not.have.property('use_pg_sync');
+      });
     });
   });
 });
