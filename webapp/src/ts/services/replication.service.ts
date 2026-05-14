@@ -20,11 +20,13 @@ export class ReplicationService {
   private readonly BATCH_SIZE=100;
 
   async replicateFrom():Promise<{ read_docs: number }> {
-    if (this.pgReplicationService.isEnabled()) {
+    const getIdsResponse = await this.callGetIds();
+
+    if (getIdsResponse?.use_pg_sync) {
       return this.pgReplicationService.replicateFrom();
     }
 
-    const remoteDocIdsRevs = await this.getRemoteDocs();
+    const remoteDocIdsRevs = getIdsResponse?.doc_ids_revs ?? [];
     const localDocs = await this.dbService.get().allDocs();
 
     const localIdRevMap = Object.assign({}, ...localDocs.rows.map(row => ({ [row.id]: row.value?.rev })));
@@ -35,13 +37,12 @@ export class ReplicationService {
     return { read_docs: nbrDeleted + nbrDownloaded };
   }
 
-  private async getRemoteDocs():Promise<{ id; rev }[]> {
-    const getIdsReq = this.http.get<{ doc_ids_revs: { id; rev }[]}>(
+  private async callGetIds():Promise<{ doc_ids_revs?: { id; rev }[]; use_pg_sync?: boolean }> {
+    const getIdsReq = this.http.get<{ doc_ids_revs?: { id; rev }[]; use_pg_sync?: boolean }>(
       '/api/v1/replication/get-ids',
       { responseType: 'json' }
     );
-    const response = await lastValueFrom(getIdsReq);
-    return response.doc_ids_revs;
+    return lastValueFrom(getIdsReq);
   }
 
   private async getMissingDocs(localIdRevMap, remoteDocIdsRevs):Promise<number> {

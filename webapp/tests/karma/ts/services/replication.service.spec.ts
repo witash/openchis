@@ -33,7 +33,6 @@ describe('ContactTypes service', () => {
     };
     rulesEngineService = { monitorExternalChanges: sinon.stub() };
     pgReplicationService = {
-      isEnabled: sinon.stub().returns(false),
       replicateFrom: sinon.stub(),
     };
 
@@ -486,21 +485,25 @@ describe('ContactTypes service', () => {
       });
     });
 
-    describe('pg-sync feature flag', () => {
-      it('delegates to PgReplicationService when flag is enabled', async () => {
-        pgReplicationService.isEnabled.returns(true);
+    describe('pg-sync server-driven switch', () => {
+      it('delegates to PgReplicationService when get-ids returns use_pg_sync: true', async () => {
+        http.get.returns(of({ use_pg_sync: true }));
         pgReplicationService.replicateFrom.resolves({ read_docs: 7 });
 
         const result = await service.replicateFrom();
 
         expect(result).to.deep.equal({ read_docs: 7 });
         expect(pgReplicationService.replicateFrom.callCount).to.equal(1);
-        expect(http.get.callCount).to.equal(0);
+        expect(http.get.args).to.deep.equal([[
+          '/api/v1/replication/get-ids',
+          { responseType: 'json' },
+        ]]);
+        // No legacy enumeration when the server says use pg-sync
         expect(localDb.allDocs.callCount).to.equal(0);
+        expect(remoteDb.bulkGet.callCount).to.equal(0);
       });
 
-      it('runs legacy get-ids path when flag is disabled and never calls pg-sync', async () => {
-        pgReplicationService.isEnabled.returns(false);
+      it('runs legacy get-ids path when use_pg_sync is absent and never calls pg-sync', async () => {
         localDb.allDocs.resolves({ rows: [] });
         http.get.returns(of({ doc_ids_revs: [] }));
 
@@ -513,6 +516,18 @@ describe('ContactTypes service', () => {
         ]]);
         const pgSyncCalls = http.post.getCalls().filter(c => c.args[0] === '/api/v1/pg-sync');
         expect(pgSyncCalls).to.have.length(0);
+      });
+
+      it('does not consult any client-side flag or localStorage', async () => {
+        // Snapshot localStorage keys before; the service must not write any
+        const before = { ...window.localStorage };
+        http.get.returns(of({ use_pg_sync: true }));
+        pgReplicationService.replicateFrom.resolves({ read_docs: 0 });
+
+        await service.replicateFrom();
+
+        const after = { ...window.localStorage };
+        expect(after).to.deep.equal(before);
       });
     });
   });
