@@ -64,3 +64,4 @@ release-notes.md
 /scripts/build/helm/values.yaml
 .agents
 TASK_STATE.md
+AGENT_ASSIGNMENT.md
