@@ -17,8 +17,25 @@ const okJson = (body) => ({
 
 describe('client', () => {
   describe('runClient (nairobi protocol)', () => {
-    it('runs each requested sync, emits per-sync metric IPC messages, then a done message', async () => {
-      const replicateFn = sinon.stub().resolves({ docs_written: 17, last_seq: 'abc' });
+    it('runs initial sync via get-ids + _bulk_get and ongoing sync via replicate, emitting per-sync metrics', async () => {
+      const idsResp = okJson({
+        doc_ids_revs: [
+          { id: 'd1', rev: '1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+          { id: 'd2', rev: '1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' },
+        ],
+        last_seq: 42,
+      });
+      const bulkGetResp = okJson({
+        results: [
+          { id: 'd1', docs: [{ ok: { _id: 'd1', _rev: '1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } }] },
+          { id: 'd2', docs: [{ ok: { _id: 'd2', _rev: '1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } }] },
+        ],
+      });
+      const fetchFn = sinon.stub();
+      fetchFn.onCall(0).resolves(idsResp);
+      fetchFn.onCall(1).resolves(bulkGetResp);
+
+      const replicateFn = sinon.stub().resolves({ docs_written: 5, last_seq: 'abc' });
       const sendMessage = sinon.spy();
       const spec = {
         id: 'u1',
@@ -31,27 +48,33 @@ describe('client', () => {
 
       await client.runClient({
         PouchDB,
-        fetchFn: () => { throw new Error('fetch should not be called for nairobi'); },
+        fetchFn,
         replicateFn,
         sendMessage,
         spec,
         baseUrl: 'http://server',
       });
 
-      expect(replicateFn.calledTwice).to.equal(true);
+      // initial: get-ids + _bulk_get (2 fetch calls, no replicate)
+      // ongoing: replicate exactly once
+      expect(fetchFn.callCount).to.equal(2);
+      expect(fetchFn.firstCall.args[0]).to.match(/\/api\/v1\/replication\/get-ids$/);
+      expect(fetchFn.secondCall.args[0]).to.match(/\/medic\/_bulk_get/);
+      expect(replicateFn.calledOnce).to.equal(true);
+
       const metrics = sendMessage.getCalls().filter((c) => c.args[0].type === 'metric').map((c) => c.args[0].row);
       expect(metrics).to.have.length(2);
       expect(metrics[0]).to.include({
-        scenario: 'baseline', protocol: 'nairobi', user_id: 'u1', sync_index: 0, kind: 'initial', docs_pulled: 17,
+        scenario: 'baseline', protocol: 'nairobi', user_id: 'u1', sync_index: 0, kind: 'initial', docs_pulled: 2,
       });
-      expect(metrics[1]).to.include({ sync_index: 1, kind: 'ongoing' });
+      expect(metrics[1]).to.include({ sync_index: 1, kind: 'ongoing', docs_pulled: 5 });
 
       const last = sendMessage.lastCall.args[0];
       expect(last).to.deep.equal({ type: 'done', user_id: 'u1' });
     });
 
-    it('emits a metric row with `error` set when a sync rejects', async () => {
-      const replicateFn = sinon.stub().rejects(new Error('connection refused'));
+    it('emits a metric row with `error` set when initial sync rejects', async () => {
+      const fetchFn = sinon.stub().rejects(new Error('connection refused'));
       const sendMessage = sinon.spy();
       const spec = {
         id: 'u-err',
@@ -64,8 +87,8 @@ describe('client', () => {
 
       await client.runClient({
         PouchDB,
-        fetchFn: () => { throw new Error('unused'); },
-        replicateFn,
+        fetchFn,
+        replicateFn: () => { throw new Error('replicate should not be called for initial'); },
         sendMessage,
         spec,
         baseUrl: 'http://server',
@@ -109,6 +132,9 @@ describe('client', () => {
       expect(fetchFn.calledOnce).to.equal(true);
       const url = fetchFn.firstCall.args[0];
       expect(url).to.equal('http://server/api/v1/pg-sync');
+      const body = JSON.parse(fetchFn.firstCall.args[1].body);
+      // pg-sync wire shape: only { since } — facility resolution stays server-side.
+      expect(Object.keys(body)).to.deep.equal(['since']);
       const metric = sendMessage.getCalls().find((c) => c.args[0].type === 'metric').args[0].row;
       expect(metric.docs_pulled).to.equal(2);
       expect(metric.error).to.equal('');

@@ -3,13 +3,5 @@
   "admin": {
     "username": "medic",
     "password": "password"
-  },
-  "userPrefix": "perf-test",
-  "fixtures": {
-    "reportsPerUser": 500,
-    "personsPerUser": 20
-  },
-  "child": {
-    "maxConcurrent": 50
   }
 }

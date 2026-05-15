@@ -51,8 +51,7 @@ const printHelp = () => {
     '  --users=<n>             number of concurrent virtual users (default 10)',
     '  --protocol=<nairobi|pg-sync|both> protocol(s) to test (default both)',
     '  --warmed-fraction=<f>   fraction of users warmed up (initial-vs-ongoing only, default 0.8)',
-    '  --run-id=<id>           a label baked into seeded fixture ids; defaults to a timestamp',
-    '  --reports-per-user=<n>  override fixture sizing (default 500)',
+    '  --run-id=<id>           label baked into the CHW username + doc shape; defaults to a timestamp',
     '  --config=<path>         load defaults from this JSON file (default tests/perf-sync/config.json)',
     '',
   ].join('\n'));
@@ -76,7 +75,6 @@ const buildContext = (parsed) => {
     throw new Error('config: missing `admin.username` / `admin.password`');
   }
   const userCount = parseInt(parsed.flags.users || '10', 10);
-  const reportsPerUser = parseInt(parsed.flags['reports-per-user'] || (config.fixtures && config.fixtures.reportsPerUser) || 500, 10);
   const warmedFraction = parseFloat(parsed.flags['warmed-fraction'] || '0.8');
   const protoArg = parsed.flags.protocol || 'both';
   const protocols = PROTOCOLS[protoArg];
@@ -84,18 +82,13 @@ const buildContext = (parsed) => {
     throw new Error(`unknown protocol: ${protoArg}`);
   }
   const runId = String(parsed.flags['run-id'] || Date.now());
-  const seed = parseInt(parsed.flags.seed || '1', 10);
   return {
     baseUrl: config.url,
     admin: config.admin,
-    userPrefix: parsed.flags['user-prefix'] || config.userPrefix || 'perf-test',
     userCount,
-    reportsPerUser,
     warmedFraction,
     protocols,
     runId,
-    seed,
-    fetchFn: globalThis.fetch,
   };
 };
 
