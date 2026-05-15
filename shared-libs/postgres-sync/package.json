@@ -1,0 +1,11 @@
+{
+  "name": "@medic/postgres-sync",
+  "version": "1.0.0",
+  "description": "CouchDB-doc → Postgres transform and bulk write for the pg-sync mirror.",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "mocha ./test"
+  },
+  "author": "",
+  "license": "Apache-2.0"
+}

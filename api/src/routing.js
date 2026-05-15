@@ -82,6 +82,7 @@ const dbDocHandler = require('./controllers/db-doc');
 const extensionLibs = require('./controllers/extension-libs');
 const replication = require('./controllers/replication');
 const pgSync = require('./controllers/pg-sync');
+const pgSyncBulkDocs = require('./controllers/pg-sync-bulk-docs');
 const app = express.Router({ strict: true });
 const asyncLocalStorage = require('./services/async-storage');
 const moment = require('moment');
@@ -854,9 +855,13 @@ app.post(
 
 // filter _bulk_docs requests for offline users
 // this is an audited endpoint: online and filtered offline requests will pass through to the audit route
+// `pgSyncBulkDocs.capture` runs BEFORE onlineUserPassThrough so it fires for
+// both online and offline users; the mirror itself executes from the
+// proxyForAuth.on('proxyRes') handler below, once CouchDB has answered.
 app.post(
   `${routePrefix}_bulk_docs{/{*any}}`,
   jsonParser,
+  pgSyncBulkDocs.capture,
   infodoc.mark,
   authorization.handleAuthErrors,
   authorization.onlineUserPassThrough, // online user requests pass through to the next route
@@ -1133,10 +1138,22 @@ proxyForAuth.on('proxyRes', (proxyRes, req, res) => {
   let body = Buffer.from('');
   proxyRes.on('data', data => (body = Buffer.concat([body, data])));
 
-  proxyRes.on('end', () => {
+  proxyRes.on('end', async () => {
     body = JSON.parse(body.toString());
     if (res.interceptResponse) {
       body = res.interceptResponse(req, res, body);
+    }
+    if (typeof res.pgSyncMirror === 'function') {
+      try {
+        await res.pgSyncMirror(req, res, body);
+      } catch (err) {
+        logger.error('pg-sync: write-through failed: %o', err);
+        return serverUtils.serverError(
+          { code: 500, message: 'postgres-sync write-through failed' },
+          req,
+          res
+        );
+      }
     }
     res.json(body);
 
