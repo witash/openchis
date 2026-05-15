@@ -934,6 +934,7 @@ app.post(
   '/api/v1/pg-sync',
   jsonParser,
   authorization.handleAuthErrors,
+  authorization.onlineUserPassThrough,
   pgSync.getDocs,
 );
 
