@@ -1,13 +1,16 @@
 'use strict';
 
-// Parent-process runner: forks N child processes (one per virtual user),
-// collects metric IPC messages into a MetricsBuffer, writes the CSV, and
-// prints a summary. The runner is kept isolated from the scenario specifics
-// so scenarios just build the spec list and hand it off.
+// In-process runner: drives N virtual users concurrently with Promise.all.
+//
+// Previously this forked one child per spec and shipped metrics over IPC.
+// Node already gives us all the concurrency we need for the IO-bound sync
+// workload, so the fork plumbing was pure overhead — each child paid a
+// fresh-process startup tax, a duplicate require graph, and an extra V8
+// heap. async/await against the same fetch + PouchDB instances is what
+// the equivalent webapp client does.
 
 const fs = require('fs');
 const path = require('path');
-const child_process = require('child_process');
 const { MetricsBuffer, formatSummaryLine } = require('./metrics');
 
 const RESULTS_DIR = path.resolve(__dirname, '..', 'results');
@@ -28,41 +31,41 @@ const writeCsv = (filePath, buffer) => {
   return filePath;
 };
 
-// Fork one child per spec. Returns a Promise<void> that resolves once every
-// child has exited. Metric messages are appended to `buffer`.
-const forkAll = (specs, baseUrl, buffer, { childPath, forkOptions } = {}) => {
-  return new Promise((resolve, reject) => {
-    if (!specs.length) {
-      return resolve();
+// Lazily resolve PouchDB so unit tests can inject a stub without pulling
+// in pouchdb-adapter-memory's native cost.
+const defaultPouchDB = () => {
+  const PouchDB = require('pouchdb');
+  if (!PouchDB.__perfSyncMemPluginLoaded) {
+    PouchDB.plugin(require('pouchdb-adapter-memory'));
+    PouchDB.__perfSyncMemPluginLoaded = true;
+  }
+  return PouchDB;
+};
+
+// Run every spec concurrently. Each spec drives one virtual user via
+// runClient (which builds its own in-memory PouchDB, posts metrics into
+// `buffer` via the sendMessage callback, and resolves on done).
+const runAll = async (specs, baseUrl, buffer, opts = {}) => {
+  if (!specs.length) {
+    return;
+  }
+  const runClient = opts.runClient || require('./client').runClient;
+  const PouchDB = opts.PouchDB || defaultPouchDB();
+  const fetchFn = opts.fetchFn || globalThis.fetch;
+  const replicateFn = opts.replicateFn || PouchDB.replicate.bind(PouchDB);
+  const sendMessage = (msg) => {
+    if (msg && msg.type === 'metric' && msg.row) {
+      buffer.add(msg.row);
     }
-    const modulePath = childPath || path.resolve(__dirname, 'client.js');
-    let outstanding = specs.length;
-    const onExit = () => {
-      outstanding -= 1;
-      if (outstanding === 0) {
-        resolve();
-      }
-    };
-    for (const spec of specs) {
-      const child = child_process.fork(modulePath, [JSON.stringify(spec)], Object.assign(
-        {
-          env: Object.assign({}, process.env, {
-            PERF_SYNC_BASE_URL: baseUrl,
-            PERF_SYNC_SPEC: JSON.stringify(spec),
-          }),
-          silent: false,
-        },
-        forkOptions || {},
-      ));
-      child.on('message', (msg) => {
-        if (msg && msg.type === 'metric' && msg.row) {
-          buffer.add(msg.row);
-        }
-      });
-      child.on('exit', onExit);
-      child.on('error', reject);
-    }
-  });
+  };
+  await Promise.all(specs.map((spec) => runClient({
+    PouchDB,
+    fetchFn,
+    replicateFn,
+    sendMessage,
+    spec,
+    baseUrl,
+  })));
 };
 
 const summarize = (buffer, scenario) => {
@@ -82,7 +85,7 @@ module.exports = {
   RESULTS_DIR,
   csvPath,
   ensureResultsDir,
-  forkAll,
+  runAll,
   summarize,
   writeCsv,
 };

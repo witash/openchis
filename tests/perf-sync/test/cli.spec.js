@@ -36,4 +36,22 @@ describe('cli', () => {
       expect(code).to.equal(2);
     });
   });
+
+  describe('buildContext', () => {
+    it('uses a timestamp run-id by default', () => {
+      const ctx = cli.buildContext(cli.parseArgs(['baseline']));
+      expect(ctx.runId).to.match(/^\d+$/);
+    });
+
+    it('honours --run-id when provided', () => {
+      const ctx = cli.buildContext(cli.parseArgs(['baseline', '--run-id=demo']));
+      expect(ctx.runId).to.equal('demo');
+    });
+
+    it('parses --users and --warmed-fraction into numbers', () => {
+      const ctx = cli.buildContext(cli.parseArgs(['baseline', '--users=20', '--warmed-fraction=0.25']));
+      expect(ctx.userCount).to.equal(20);
+      expect(ctx.warmedFraction).to.equal(0.25);
+    });
+  });
 });

@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { expect } = require('chai');
+const sinon = require('sinon');
 
 const runner = require('../lib/runner');
 const { MetricsBuffer } = require('../lib/metrics');
@@ -46,27 +47,49 @@ describe('runner', () => {
     });
   });
 
-  describe('forkAll', () => {
+  describe('runAll', () => {
     it('resolves immediately with an empty spec list', async () => {
-      await runner.forkAll([], 'http://server', new MetricsBuffer());
+      await runner.runAll([], 'http://server', new MetricsBuffer());
     });
 
-    it('collects metric IPC messages from child processes into the buffer', async function () {
-      this.timeout(10000);
-      const fakeChild = path.join(os.tmpdir(), `perf-sync-fake-child-${Date.now()}.js`);
-      fs.writeFileSync(fakeChild, `
-        process.send({ type: 'metric', row: { scenario: 'baseline', protocol: 'pg-sync', user_id: 'fake', sync_index: 0, kind: 'initial', docs_pulled: 1, docs_pushed: 0, elapsed_ms: 5, error: '' } });
-        process.send({ type: 'done', user_id: 'fake' });
-        setTimeout(() => process.exit(0), 30);
-      `);
-      try {
-        const buf = new MetricsBuffer();
-        await runner.forkAll([{ id: 'fake' }], 'http://server', buf, { childPath: fakeChild });
-        expect(buf.rows).to.have.length(1);
-        expect(buf.rows[0]).to.include({ user_id: 'fake', protocol: 'pg-sync' });
-      } finally {
-        fs.unlinkSync(fakeChild);
-      }
+    it('invokes runClient once per spec in parallel and routes metric messages into the buffer', async () => {
+      const runClient = sinon.stub().callsFake(async ({ spec, sendMessage }) => {
+        sendMessage({ type: 'metric', row: { user_id: spec.id, scenario: 'baseline', protocol: 'pg-sync', elapsed_ms: 1 } });
+        sendMessage({ type: 'done', user_id: spec.id });
+      });
+      const buffer = new MetricsBuffer();
+      await runner.runAll(
+        [{ id: 'a' }, { id: 'b' }, { id: 'c' }],
+        'http://server',
+        buffer,
+        {
+          runClient,
+          PouchDB: function FakePouch() {},
+          fetchFn: () => Promise.reject(new Error('unused')),
+          replicateFn: () => Promise.reject(new Error('unused')),
+        },
+      );
+      expect(runClient.callCount).to.equal(3);
+      expect(buffer.rows.map((r) => r.user_id).sort()).to.deep.equal(['a', 'b', 'c']);
     });
+
+    it('runs the per-user work concurrently, not serially', async () => {
+      // Each fake runClient blocks for 30ms; three of them in serial would
+      // take ~90ms but Promise.all parallelism should finish near 30ms.
+      const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+      const runClient = sinon.stub().callsFake(async ({ spec, sendMessage }) => {
+        await delay(30);
+        sendMessage({ type: 'metric', row: { user_id: spec.id } });
+      });
+      const start = Date.now();
+      await runner.runAll(
+        [{ id: 'a' }, { id: 'b' }, { id: 'c' }],
+        'http://server',
+        new MetricsBuffer(),
+        { runClient, PouchDB: function FakePouch() {}, fetchFn: () => null, replicateFn: () => null },
+      );
+      expect(Date.now() - start).to.be.lessThan(75);
+    });
+
   });
 });
