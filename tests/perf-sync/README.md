@@ -52,11 +52,14 @@ npm run dev-api 2>&1 | tee tests/perf-sync/logs/perf-api.log
 Then, from the worktree root:
 
 ```bash
-# Baseline (initial sync only):
+# Baseline (initial sync only). Supported --protocol values: pg-sync, nairobi.
 node tests/perf-sync/cli.js baseline --users=1 --protocol=pg-sync --run-id=smoke
 
 # Initial + ongoing sync; verifies the _local cursor round-trip:
 node tests/perf-sync/cli.js initial-vs-ongoing --users=1 --protocol=pg-sync --run-id=cursor
+
+# Run both protocols against the same CHW and report the doc-id set diff:
+node tests/perf-sync/cli.js compare-protocols --users=1 --run-id=cmp
 ```
 
 Expected stdout for `baseline`:
@@ -85,6 +88,19 @@ with no new writes between sync #1 and sync #2, asking for
 `since=last_seq_from_sync_1` must yield zero new docs. The `ongoing_ms`
 percentiles being an order of magnitude smaller than `initial_ms` is
 the signal that the round-trip itself collapsed.
+
+`compare-protocols` runs nairobi then pg-sync sequentially against the
+same CHW and reports the doc-id set diff. Two asymmetries are expected
+today:
+
+- **pg-sync has +100 tasks per CHW.** `docs_by_replication_key` keys
+  tasks by `doc.user`; test-data-generator emits `owner` but no `user`,
+  so the view returns zero tasks for these CHWs. pg-sync's
+  `transform.getSubject` falls back to `doc.owner` per PROJECT.md.
+- **nairobi has +~37 system docs.** The view emits `_design/medic-client`,
+  `branding`, `settings`, contact-form ddocs, translations, etc. with
+  `key=_all` so every user replicates them. pg-sync's transform does
+  not currently mirror that "global doc" pathway.
 
 ## CSV output
 

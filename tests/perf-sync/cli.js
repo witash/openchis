@@ -11,9 +11,21 @@ const path = require('path');
 const SCENARIOS = {
   baseline: require('./scenarios/baseline'),
   'initial-vs-ongoing': require('./scenarios/initial-vs-ongoing'),
+  'compare-protocols': require('./scenarios/compare-protocols'),
 };
 
-const PROTOCOLS = new Set(['pg-sync', 'pg', 'postgres']);
+const PG_SYNC_ALIASES = new Set(['pg-sync', 'pg', 'postgres']);
+const NAIROBI_ALIASES = new Set(['nairobi', 'couch', 'couchdb']);
+const PROTOCOLS = new Set([...PG_SYNC_ALIASES, ...NAIROBI_ALIASES]);
+const canonicalProtocol = (raw) => {
+  if (PG_SYNC_ALIASES.has(raw)) {
+    return 'pg-sync';
+  }
+  if (NAIROBI_ALIASES.has(raw)) {
+    return 'nairobi';
+  }
+  return null;
+};
 
 const parseArgs = (argv) => {
   const out = { _: [], flags: {} };
@@ -67,15 +79,16 @@ const buildContext = (parsed) => {
   }
   const userCount = parseInt(parsed.flags.users || '1', 10);
   const protoArg = parsed.flags.protocol || 'pg-sync';
-  if (!PROTOCOLS.has(protoArg)) {
-    throw new Error(`unknown protocol: ${protoArg} (only pg-sync supported in Phase A)`);
+  const protocol = canonicalProtocol(protoArg);
+  if (!protocol) {
+    throw new Error(`unknown protocol: ${protoArg} (supported: pg-sync, nairobi)`);
   }
   const runId = String(parsed.flags['run-id'] || Date.now());
   return {
     baseUrl: config.url,
     admin: config.admin,
     userCount,
-    protocol: 'pg-sync',
+    protocol,
     runId,
   };
 };
@@ -100,8 +113,11 @@ const main = async (argv) => {
 
 module.exports = {
   PROTOCOLS,
+  PG_SYNC_ALIASES,
+  NAIROBI_ALIASES,
   SCENARIOS,
   buildContext,
+  canonicalProtocol,
   main,
   parseArgs,
 };
