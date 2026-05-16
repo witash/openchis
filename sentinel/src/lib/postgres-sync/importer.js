@@ -1,4 +1,4 @@
-const transform = require('./transform');
+const pgSync = require('@medic/postgres-sync');
 
 const SELECT_PROGRESS = 'SELECT seq FROM couch2pg_progress WHERE source = $1';
 const UPSERT_PROGRESS = `
@@ -9,19 +9,6 @@ const UPSERT_PROGRESS = `
     updated_at = NOW()
 `;
 
-const INSERT_DOC = `
-  INSERT INTO medic_documents
-    (_id, _rev, couchdb_seq, doc, subject, type, deleted)
-  VALUES
-    ($1, $2, $3, $4, $5, $6, $7)
-  ON CONFLICT (_id, _rev) DO UPDATE SET
-    couchdb_seq = EXCLUDED.couchdb_seq,
-    doc = EXCLUDED.doc,
-    subject = EXCLUDED.subject,
-    type = EXCLUDED.type,
-    deleted = EXCLUDED.deleted
-`;
-
 const UPDATE_DOC_SUBJECT_BY_ID = `
   UPDATE medic_documents
   SET subject = $1
@@ -30,28 +17,8 @@ const UPDATE_DOC_SUBJECT_BY_ID = `
 
 const SELECT_CONTACT = 'SELECT id, parent, lineage FROM contacts WHERE id = $1';
 const SELECT_DESCENDANTS = 'SELECT id, lineage FROM contacts WHERE $1 = ANY(lineage)';
-const UPSERT_CONTACT = `
-  INSERT INTO contacts
-    (id, type, contact_type, parent, lineage, name, muted, phone, shortcode)
-  VALUES
-    ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-  ON CONFLICT (id) DO UPDATE SET
-    type = EXCLUDED.type,
-    contact_type = EXCLUDED.contact_type,
-    parent = EXCLUDED.parent,
-    lineage = EXCLUDED.lineage,
-    name = EXCLUDED.name,
-    muted = EXCLUDED.muted,
-    phone = EXCLUDED.phone,
-    shortcode = EXCLUDED.shortcode
-`;
 const UPDATE_CONTACT_LINEAGE = 'UPDATE contacts SET lineage = $1 WHERE id = $2';
 const DELETE_CONTACT = 'DELETE FROM contacts WHERE id = $1';
-
-// Postgres rejects U+0000 inside JSONB; strip both escaped and literal forms.
-// Built via RegExp constructor to avoid embedding a literal NUL in source.
-const NULL_BYTE_PATTERN = new RegExp('(\\\\+u0000)|' + String.fromCharCode(0), 'g');
-const sanitize = (text) => text && text.replace(NULL_BYTE_PATTERN, '');
 
 const arraysEqual = (a, b) => {
   if (!Array.isArray(a) || !Array.isArray(b)) {
@@ -136,50 +103,28 @@ const cascadeLineage = async (client, contactId, newContactLineage) => {
   }
 };
 
-const insertDocRow = async (client, change) => {
+// Build a sentinel-style record for a change-feed entry. The shared lib's
+// `transform()` does the heavy lifting; sentinel adds the changes-feed `seq`
+// (couchdb_seq) and handles the deleted-changes envelope (where the rev lives
+// on `change.changes[0].rev`, not `change.doc._rev`).
+const buildRecord = (change) => {
   if (change.deleted) {
     const rev = (change.changes && change.changes[0] && change.changes[0].rev) ||
       (change.doc && change.doc._rev) ||
-      '';
-    const tombstone = { _id: change.id, _rev: rev, _deleted: true };
-    await client.query(INSERT_DOC, [
-      change.id,
-      rev || '0',
-      change.seq ? String(change.seq) : null,
-      JSON.stringify(tombstone),
-      null,
-      null,
-      true,
-    ]);
-    return;
+      null;
+    const tombstoneDoc = {
+      _id: change.id,
+      _rev: rev || '0',
+      _deleted: true,
+    };
+    const record = pgSync.transform(tombstoneDoc, {
+      couchdbSeq: change.seq === undefined || change.seq === null ? null : change.seq,
+    });
+    return record;
   }
-
-  const doc = change.doc;
-  const docType = transform.getDocType(doc);
-  const subject = transform.getSubject(doc);
-  await client.query(INSERT_DOC, [
-    doc._id,
-    doc._rev,
-    change.seq ? String(change.seq) : null,
-    sanitize(JSON.stringify(doc)),
-    subject,
-    docType,
-    false,
-  ]);
-};
-
-const upsertContactRow = async (client, doc, lineage) => {
-  await client.query(UPSERT_CONTACT, [
-    doc._id,
-    doc.type || null,
-    transform.getContactType(doc),
-    transform.getParentId(doc),
-    lineage,
-    typeof doc.name === 'string' ? doc.name : null,
-    doc.muted ? new Date(doc.muted) : null,
-    typeof doc.phone === 'string' ? doc.phone : null,
-    typeof doc.shortcode === 'string' ? doc.shortcode : null,
-  ]);
+  return pgSync.transform(change.doc, {
+    couchdbSeq: change.seq === undefined || change.seq === null ? null : change.seq,
+  });
 };
 
 const processChange = async (client, change) => {
@@ -187,31 +132,30 @@ const processChange = async (client, change) => {
     return { skipped: true, reason: 'malformed' };
   }
 
-  await insertDocRow(client, change);
+  const record = buildRecord(change);
+
+  // For contact docs we need to: (1) look up the previous lineage so we know
+  // whether to cascade, (2) compute the new lineage from the parent, (3) write.
+  let previousContact = null;
+  if (record.contact) {
+    previousContact = await lookupContact(client, record.contact.id);
+    record.contact.lineage = await computeLineageForParent(client, record.contact.parent);
+  }
+
+  await pgSync.write([record], client);
 
   if (change.deleted) {
     await client.query(DELETE_CONTACT, [change.id]);
     return { ok: true };
   }
 
-  const doc = change.doc;
-  if (!transform.isContactDoc(doc)) {
-    return { ok: true };
-  }
-
-  const parentId = transform.getParentId(doc);
-  const newLineage = await computeLineageForParent(client, parentId);
-
-  const previous = await lookupContact(client, doc._id);
-
-  await upsertContactRow(client, doc, newLineage);
-
-  if (previous && !arraysEqual(previous.lineage || [], newLineage)) {
-    await cascadeLineage(client, doc._id, newLineage);
+  if (record.contact && previousContact
+    && !arraysEqual(previousContact.lineage || [], record.contact.lineage)) {
+    await cascadeLineage(client, record.contact.id, record.contact.lineage);
     // The contact's subject (its own id) hasn't changed, but re-stamp it on
     // medic_documents rows referencing this contact to handle the edge case
     // where prior writes landed with subject = null.
-    await client.query(UPDATE_DOC_SUBJECT_BY_ID, [doc._id, doc._id]);
+    await client.query(UPDATE_DOC_SUBJECT_BY_ID, [record.contact.id, record.contact.id]);
   }
 
   return { ok: true };
@@ -253,14 +197,12 @@ module.exports = {
   computeLineageForParent,
   cascadeLineage,
   isMalformed,
-  sanitize,
+  sanitize: pgSync.sanitize,
   _sql: {
     SELECT_PROGRESS,
     UPSERT_PROGRESS,
-    INSERT_DOC,
     SELECT_CONTACT,
     SELECT_DESCENDANTS,
-    UPSERT_CONTACT,
     UPDATE_CONTACT_LINEAGE,
     DELETE_CONTACT,
     UPDATE_DOC_SUBJECT_BY_ID,
