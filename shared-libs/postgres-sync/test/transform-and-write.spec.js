@@ -88,6 +88,29 @@ describe('postgres-sync transformAndWrite', () => {
     expect(insert.args[1][4]).to.deep.equal(['future']);
   });
 
+  it('threads in-batch ancestors into descendants\' lineage in one pass', async () => {
+    const client = makeClient();
+    // None of the parents exist in pg yet — they are all part of this batch.
+    client.query.withArgs(matchSelectParents()).resolves({ rows: [] });
+    const docs = [
+      { _id: 'd1', _rev: '1', type: 'district_hospital' },
+      { _id: 'h1', _rev: '1', type: 'health_center', parent: { _id: 'd1' } },
+      { _id: 'c1', _rev: '1', type: 'clinic', parent: { _id: 'h1' } },
+      { _id: 'p1', _rev: '1', type: 'person', parent: { _id: 'c1' } },
+    ];
+    await transformAndWrite(docs, client);
+
+    // The SELECT is skipped entirely when every parent is in the batch.
+    expect(client.query.withArgs(matchSelectParents()).callCount).to.equal(0);
+
+    // 4 contacts × 9 cols = 36 params. lineage at column index 4 of each row.
+    const params = client.query.withArgs(matchInsertContacts()).firstCall.args[1];
+    expect(params[4]).to.deep.equal([]);                       // d1
+    expect(params[13]).to.deep.equal(['d1']);                  // h1
+    expect(params[22]).to.deep.equal(['h1', 'd1']);            // c1
+    expect(params[31]).to.deep.equal(['c1', 'h1', 'd1']);      // p1
+  });
+
   it('issues exactly one INSERT per table for a mixed batch', async () => {
     const client = makeClient();
     client.query.withArgs(matchSelectParents()).resolves({
