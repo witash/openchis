@@ -41,6 +41,7 @@ const runAll = async (specs, baseUrl, buffer, opts = {}) => {
   const runClient = opts.runClient || require('./client').runClient;
   const PouchDB = opts.PouchDB || defaultPouchDB();
   const fetchFn = opts.fetchFn || globalThis.fetch;
+  const replicateFn = opts.replicateFn || PouchDB.replicate.bind(PouchDB);
   const sendMessage = (msg) => {
     if (msg && msg.type === 'metric' && msg.row) {
       buffer.add(msg.row);
@@ -49,6 +50,7 @@ const runAll = async (specs, baseUrl, buffer, opts = {}) => {
   await Promise.all(specs.map((spec) => runClient({
     PouchDB,
     fetchFn,
+    replicateFn,
     sendMessage,
     spec,
     baseUrl,
