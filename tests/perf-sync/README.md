@@ -63,23 +63,28 @@ Expected stdout for `baseline`:
 
 ```
 baseline: CSV written to .../tests/perf-sync/results/baseline-pg-sync-<ts>.csv
-scenario=baseline protocol=pg-sync users=1 elapsed_ms=<n> docs_pulled=<~162> errors=0
+scenario=baseline protocol=pg-sync users=<n> docs_pulled=<~162*n> errors=0 \
+  elapsed_ms=[p50=<n> p95=<n> max=<n>]
 ```
 
-`docs_pulled` should land in the 60–170 range — roughly 1
+`docs_pulled` per user should land in the 60–170 range — roughly 1
 health_center + 10 households + 40 persons + 10 reports + 100 tasks +
-the CHW's own contact, plus the CHW's `user-settings`.
+the CHW's own contact, plus the CHW's `user-settings`. `max=` is a
+rough wall-clock proxy for the concurrent fan-out.
 
 Expected stdout for `initial-vs-ongoing`:
 
 ```
 initial-vs-ongoing: CSV written to .../tests/perf-sync/results/initial-vs-ongoing-pg-sync-<ts>.csv
-scenario=initial-vs-ongoing protocol=pg-sync users=1 initial_docs=162 ongoing_docs=0 errors=0
+scenario=initial-vs-ongoing protocol=pg-sync users=<n> initial_docs=<~162*n> ongoing_docs=0 errors=0 \
+  initial_ms=[p50=<n> p95=<n> max=<n>] ongoing_ms=[p50=<n> p95=<n> max=<n>]
 ```
 
 `ongoing_docs=0` is the proof that the second sync honoured the cursor —
 with no new writes between sync #1 and sync #2, asking for
-`since=last_seq_from_sync_1` must yield zero new docs.
+`since=last_seq_from_sync_1` must yield zero new docs. The `ongoing_ms`
+percentiles being an order of magnitude smaller than `initial_ms` is
+the signal that the round-trip itself collapsed.
 
 ## CSV output
 

@@ -12,7 +12,7 @@
 
 const runner = require('../lib/runner');
 const setup = require('../lib/setup');
-const { MetricsBuffer } = require('../lib/metrics');
+const { MetricsBuffer, summarizeElapsed } = require('../lib/metrics');
 
 const SCENARIO = 'initial-vs-ongoing';
 const DEFAULT_CHW_PASSWORD = 'password';
@@ -40,8 +40,12 @@ const summarize = (buffer, scenario, protocol, userCount) => {
   const ongoingRows = rows.filter((r) => r.kind === 'ongoing');
   const initialDocs = initialRows.reduce((a, r) => a + Number(r.docs_pulled || 0), 0);
   const ongoingDocs = ongoingRows.reduce((a, r) => a + Number(r.docs_pulled || 0), 0);
+  const initialElapsed = summarizeElapsed(initialRows.map((r) => r.elapsed_ms));
+  const ongoingElapsed = summarizeElapsed(ongoingRows.map((r) => r.elapsed_ms));
   return `scenario=${scenario} protocol=${protocol} users=${userCount} `
-    + `initial_docs=${initialDocs} ongoing_docs=${ongoingDocs} errors=${errors}`;
+    + `initial_docs=${initialDocs} ongoing_docs=${ongoingDocs} errors=${errors} `
+    + `initial_ms=[p50=${initialElapsed.p50_ms} p95=${initialElapsed.p95_ms} max=${initialElapsed.max_ms}] `
+    + `ongoing_ms=[p50=${ongoingElapsed.p50_ms} p95=${ongoingElapsed.p95_ms} max=${ongoingElapsed.max_ms}]`;
 };
 
 const run = async ({ baseUrl, admin, userCount, runId, protocol, runSetupFn }) => {

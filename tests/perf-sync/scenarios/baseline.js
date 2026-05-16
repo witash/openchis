@@ -4,7 +4,7 @@
 
 const runner = require('../lib/runner');
 const setup = require('../lib/setup');
-const { MetricsBuffer } = require('../lib/metrics');
+const { MetricsBuffer, summarizeElapsed } = require('../lib/metrics');
 
 const SCENARIO = 'baseline';
 
@@ -30,9 +30,10 @@ const summarize = (buffer, scenario, protocol, userCount) => {
   const rows = buffer.rows;
   const errors = rows.filter((r) => r.error).length;
   const docsPulled = rows.reduce((a, r) => a + (Number(r.docs_pulled) || 0), 0);
-  const elapsed = rows.reduce((a, r) => a + (Number(r.elapsed_ms) || 0), 0);
+  const elapsed = summarizeElapsed(rows.map((r) => r.elapsed_ms));
   return `scenario=${scenario} protocol=${protocol} users=${userCount} `
-    + `elapsed_ms=${elapsed} docs_pulled=${docsPulled} errors=${errors}`;
+    + `docs_pulled=${docsPulled} errors=${errors} `
+    + `elapsed_ms=[p50=${elapsed.p50_ms} p95=${elapsed.p95_ms} max=${elapsed.max_ms}]`;
 };
 
 const run = async ({ baseUrl, admin, userCount, runId, protocol, runSetupFn }) => {
