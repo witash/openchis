@@ -120,8 +120,10 @@ const getSubject = (doc) => {
     case 'data_record':
       return getDataRecordSubject(doc) || '_unassigned';
     case 'task':
-    // The view keys tasks by `doc.user`. PROJECT.md says "view wins".
-      return doc.user || null;
+    // The view keys tasks by `doc.user` (the user's `_users` doc id).
+    // PROJECT.md's PoC auth model authorizes by the owning contact UUID
+    // (`doc.owner`), so fall back to that when `user` is absent.
+      return doc.user || doc.owner || null;
     case 'target':
       return doc.owner || null;
     default:

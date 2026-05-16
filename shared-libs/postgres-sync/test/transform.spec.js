@@ -211,7 +211,11 @@ describe('postgres-sync transform', () => {
         .to.equal('org.couchdb.user:eve');
     });
 
-    it('returns null for a task doc without a user', () => {
+    it('falls back to the owner field for task docs without a user', () => {
+      expect(getSubject({ type: 'task', owner: 'contact-77' })).to.equal('contact-77');
+    });
+
+    it('returns null for a task doc with no user or owner', () => {
       expect(getSubject({ type: 'task' })).to.equal(null);
     });
 
