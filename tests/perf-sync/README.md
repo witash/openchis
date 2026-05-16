@@ -1,10 +1,10 @@
-# perf-sync — Phase A live-stack baseline
+# perf-sync — live-stack pg-sync harness
 
-Single-user pg-sync baseline against a live API + CouchDB + Postgres stack.
-Phase A is intentionally narrow: one CHW, one initial sync, one CSV row.
-Multi-user fan-out, the Nairobi driver, the `initial-vs-ongoing` scenario,
-and percentile metrics are deferred to Phase B (see `AGENT_ASSIGNMENT.md`
-when starting that work).
+Pg-sync sync-performance harness against a live API + CouchDB + Postgres
+stack. The Phase A bar (`baseline --users=1`) is the contract, and the
+multi-user fan-out, `initial-vs-ongoing` scenario, and cursor round-trip
+are all exercised. The Nairobi driver and percentile metrics are still
+deferred (see `AGENT_ASSIGNMENT.md`).
 
 ## What this harness does
 
@@ -52,10 +52,14 @@ npm run dev-api 2>&1 | tee tests/perf-sync/logs/perf-api.log
 Then, from the worktree root:
 
 ```bash
+# Baseline (initial sync only):
 node tests/perf-sync/cli.js baseline --users=1 --protocol=pg-sync --run-id=smoke
+
+# Initial + ongoing sync; verifies the _local cursor round-trip:
+node tests/perf-sync/cli.js initial-vs-ongoing --users=1 --protocol=pg-sync --run-id=cursor
 ```
 
-Expected stdout:
+Expected stdout for `baseline`:
 
 ```
 baseline: CSV written to .../tests/perf-sync/results/baseline-pg-sync-<ts>.csv
@@ -65,6 +69,17 @@ scenario=baseline protocol=pg-sync users=1 elapsed_ms=<n> docs_pulled=<~162> err
 `docs_pulled` should land in the 60–170 range — roughly 1
 health_center + 10 households + 40 persons + 10 reports + 100 tasks +
 the CHW's own contact, plus the CHW's `user-settings`.
+
+Expected stdout for `initial-vs-ongoing`:
+
+```
+initial-vs-ongoing: CSV written to .../tests/perf-sync/results/initial-vs-ongoing-pg-sync-<ts>.csv
+scenario=initial-vs-ongoing protocol=pg-sync users=1 initial_docs=162 ongoing_docs=0 errors=0
+```
+
+`ongoing_docs=0` is the proof that the second sync honoured the cursor —
+with no new writes between sync #1 and sync #2, asking for
+`since=last_seq_from_sync_1` must yield zero new docs.
 
 ## CSV output
 
@@ -76,7 +91,7 @@ Columns in `tests/perf-sync/results/<scenario>-<protocol>-<ts>.csv`:
 | `protocol` | `pg-sync` |
 | `user_id` | username of the virtual user |
 | `sync_index` | 0-based sync within the user's scenario flow |
-| `kind` | `initial` (Phase A is initial-only) |
+| `kind` | `initial` for the first sync, `ongoing` for subsequent syncs |
 | `docs_pulled` | docs the client received from the server this sync |
 | `docs_pushed` | always 0 in Phase A (uploads are out of scope) |
 | `elapsed_ms` | wall-clock around the sync call |

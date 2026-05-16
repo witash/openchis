@@ -10,6 +10,7 @@ const path = require('path');
 
 const SCENARIOS = {
   baseline: require('./scenarios/baseline'),
+  'initial-vs-ongoing': require('./scenarios/initial-vs-ongoing'),
 };
 
 const PROTOCOLS = new Set(['pg-sync', 'pg', 'postgres']);
