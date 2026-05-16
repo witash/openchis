@@ -1,27 +1,18 @@
 #!/usr/bin/env node
 'use strict';
 
-// Perf-sync CLI.
+// Perf-sync CLI — Phase A (single-user pg-sync baseline against a live stack).
 //
-//   node tests/perf-sync/cli.js --help
-//   node tests/perf-sync/cli.js baseline --users=50 --protocol=both
-//   node tests/perf-sync/cli.js initial-vs-ongoing --users=50 --warmed-fraction=0.8 --protocol=both
+//   node tests/perf-sync/cli.js baseline --users=1 --protocol=pg-sync --run-id=smoke
 
 const fs = require('fs');
 const path = require('path');
 
 const SCENARIOS = {
   baseline: require('./scenarios/baseline'),
-  'initial-vs-ongoing': require('./scenarios/initial-vs-ongoing'),
 };
 
-const PROTOCOLS = {
-  nairobi: ['nairobi'],
-  pg: ['pg-sync'],
-  postgres: ['pg-sync'],
-  'pg-sync': ['pg-sync'],
-  both: ['nairobi', 'pg-sync'],
-};
+const PROTOCOLS = new Set(['pg-sync', 'pg', 'postgres']);
 
 const parseArgs = (argv) => {
   const out = { _: [], flags: {} };
@@ -48,11 +39,10 @@ const printHelp = () => {
     ...Object.keys(SCENARIOS).map((s) => `  ${s}`),
     '',
     'Options:',
-    '  --users=<n>             number of concurrent virtual users (default 10)',
-    '  --protocol=<nairobi|pg-sync|both> protocol(s) to test (default both)',
-    '  --warmed-fraction=<f>   fraction of users warmed up (initial-vs-ongoing only, default 0.8)',
-    '  --run-id=<id>           label baked into the CHW username + doc shape; defaults to a timestamp',
-    '  --config=<path>         load defaults from this JSON file (default tests/perf-sync/config.json)',
+    '  --users=<n>             concurrent virtual users (default 1; Phase A is 1)',
+    '  --protocol=pg-sync      protocol to test (only pg-sync in Phase A)',
+    '  --run-id=<id>           label baked into the CHW username (default a timestamp)',
+    '  --config=<path>         JSON config (default tests/perf-sync/config.json)',
     '',
   ].join('\n'));
 };
@@ -74,20 +64,17 @@ const buildContext = (parsed) => {
   if (!config.admin || !config.admin.username) {
     throw new Error('config: missing `admin.username` / `admin.password`');
   }
-  const userCount = parseInt(parsed.flags.users || '10', 10);
-  const warmedFraction = parseFloat(parsed.flags['warmed-fraction'] || '0.8');
-  const protoArg = parsed.flags.protocol || 'both';
-  const protocols = PROTOCOLS[protoArg];
-  if (!protocols) {
-    throw new Error(`unknown protocol: ${protoArg}`);
+  const userCount = parseInt(parsed.flags.users || '1', 10);
+  const protoArg = parsed.flags.protocol || 'pg-sync';
+  if (!PROTOCOLS.has(protoArg)) {
+    throw new Error(`unknown protocol: ${protoArg} (only pg-sync supported in Phase A)`);
   }
   const runId = String(parsed.flags['run-id'] || Date.now());
   return {
     baseUrl: config.url,
     admin: config.admin,
     userCount,
-    warmedFraction,
-    protocols,
+    protocol: 'pg-sync',
     runId,
   };
 };

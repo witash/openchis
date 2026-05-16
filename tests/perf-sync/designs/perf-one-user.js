@@ -1,18 +1,18 @@
-// Thin wrapper around test-data-generator's many-users.js design.
+// Thin wrapper around test-data-generator's `sample-designs/one-user.js`.
 //
-// Re-uses the entire CHW subtree shape — district_hospital →
-// health_center → household → {patients, chw} plus the chw-supervisor
-// sibling, with the chw getting _users + user-settings + telemetry +
-// 100 tasks and one pregnancy-danger-sign report — by invoking the
-// upstream factory once per virtual user. The only thing we override is
-// the CHW's username so the harness can sign in by deriving it from
-// (runId, index) without round-tripping CouchDB.
+// The upstream design produces, per invocation, a single CHW subtree:
+//   district_hospital → health_center → [10 households, 1 chw]
+// with each household holding 4 person docs (woman, child, infant, patient)
+// plus one pregnancy_danger_sign report attached to the woman, and the chw
+// holding _users + user-settings + telemetry + 100 tasks.
 //
-// This file is ESM because test-data-generator is ESM. The upstream
-// factory is injected via `configure({ upstreamDesign })` rather than
-// imported directly so the wrapper isn't tied to a particular relative
-// path between repos — `setup.js` resolves it from disk and hands it
-// in, and unit tests can swap in a synthetic factory the same way.
+// We override only the CHW's `username` field so the harness can sign in
+// by deriving it from (runId, index) without round-tripping CouchDB.
+//
+// ESM because test-data-generator is ESM. The upstream factory is injected
+// via `configure({ upstreamDesign })` rather than imported directly so the
+// wrapper isn't tied to a particular relative path between repos —
+// `setup.js` resolves it from disk and hands it in.
 
 const config = { userCount: 1, runId: 'default', upstreamDesign: null };
 
@@ -36,16 +36,16 @@ export const chwUsernameFor = (runId, index) => `perf-chw-${runId}-${index}`;
 const stampUsername = (designs, runId, userIndex) => {
   const districtHospital = designs.find((d) => d.designId === 'district-hospital');
   if (!districtHospital) {
-    throw new Error('perf-many-users: upstream design lacks district-hospital');
+    throw new Error('perf-one-user: upstream design lacks district-hospital');
   }
   const healthCenter = districtHospital.children
     && districtHospital.children.find((d) => d.designId === 'health-center');
   if (!healthCenter) {
-    throw new Error('perf-many-users: upstream design lacks health-center');
+    throw new Error('perf-one-user: upstream design lacks health-center');
   }
   const chw = healthCenter.children && healthCenter.children.find((d) => d.designId === 'chw');
   if (!chw) {
-    throw new Error('perf-many-users: upstream design lacks chw');
+    throw new Error('perf-one-user: upstream design lacks chw');
   }
   const upstreamGetDoc = chw.getDoc;
   chw.getDoc = (ctx) => ({
@@ -56,7 +56,7 @@ const stampUsername = (designs, runId, userIndex) => {
 
 export default (context) => {
   if (!config.upstreamDesign) {
-    throw new Error('perf-many-users: configure({ upstreamDesign }) must be called first');
+    throw new Error('perf-one-user: configure({ upstreamDesign }) must be called first');
   }
   const out = [];
   for (let i = 0; i < config.userCount; i++) {

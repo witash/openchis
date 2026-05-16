@@ -64,6 +64,40 @@ const stitchPerfUsernames = ({ docs, runId, userCount }) => {
   return chws.map((d) => ({ username: d.username, contact_id: d._id }));
 };
 
+// `_bulk_docs` ignores conflicts silently in test-data-generator's doc-writer,
+// so a repeat run with the same runId leaves the user/user-settings doc
+// pointing at the **previous** run's CHW and hierarchy. That stale facility_id
+// is no longer in Postgres and `req.userCtx` resolves to ids the pg-sync
+// endpoint cannot authorize against. Delete the user records before each run
+// so the fresh CHW's facility_id / contact_id land in CouchDB.
+const cleanupStaleUserDocs = async ({ baseUrl, admin, runId, userCount, fetchFn = globalThis.fetch }) => {
+  const auth = 'Basic ' + Buffer.from(`${admin.username}:${admin.password}`).toString('base64');
+  const headers = { Authorization: auth, 'Content-Type': 'application/json' };
+  const base = baseUrl.replace(/\/+$/, '');
+  const dbs = ['_users', 'medic'];
+  for (let i = 0; i < userCount; i++) {
+    const userDocId = `org.couchdb.user:perf-chw-${runId}-${i}`;
+    for (const db of dbs) {
+      const url = `${base}/${db}/${encodeURIComponent(userDocId)}`;
+      const head = await fetchFn(url, { method: 'HEAD', headers });
+      if (head.status === 404) {
+        continue;
+      }
+      if (!head.ok) {
+        throw new Error(`perf-sync setup: HEAD ${url} → ${head.status}`);
+      }
+      const rev = (head.headers.get('etag') || '').replace(/^"|"$/g, '');
+      if (!rev) {
+        throw new Error(`perf-sync setup: missing ETag on HEAD ${url}`);
+      }
+      const del = await fetchFn(`${url}?rev=${encodeURIComponent(rev)}`, { method: 'DELETE', headers });
+      if (!del.ok) {
+        throw new Error(`perf-sync setup: DELETE ${url} → ${del.status}`);
+      }
+    }
+  }
+};
+
 const runSetup = async (opts) => {
   const {
     baseUrl,
@@ -74,6 +108,7 @@ const runSetup = async (opts) => {
     importDesign,  // injectable for tests
     importUpstream, // injectable for tests
     tdgPaths,
+    cleanupFn = cleanupStaleUserDocs,
     env = process.env,
   } = opts;
 
@@ -87,6 +122,8 @@ const runSetup = async (opts) => {
     throw new Error('perf-sync setup: runId required');
   }
 
+  await cleanupFn({ baseUrl, admin, runId: String(runId), userCount });
+
   env.COUCH_URL = buildCouchUrl({ baseUrl, admin });
 
   const tdgRoot = resolveTdgRoot(tdgPaths);
@@ -94,9 +131,9 @@ const runSetup = async (opts) => {
   const loadDocs = importDocs
     || (() => import(path.resolve(tdgRoot, 'built/docs.js')));
   const loadDesign = importDesign
-    || (() => import(path.resolve(__dirname, '../designs/perf-many-users.js')));
+    || (() => import(path.resolve(__dirname, '../designs/perf-one-user.js')));
   const loadUpstream = importUpstream
-    || (() => import(path.resolve(tdgRoot, 'sample-designs/many-users.js')));
+    || (() => import(path.resolve(tdgRoot, 'sample-designs/one-user.js')));
 
   const [{ Docs }, designModule, upstream] = await Promise.all([
     loadDocs(),
@@ -124,6 +161,7 @@ const runSetup = async (opts) => {
 
 module.exports = {
   buildCouchUrl,
+  cleanupStaleUserDocs,
   runSetup,
   resolveTdgRoot,
   stitchPerfUsernames,
