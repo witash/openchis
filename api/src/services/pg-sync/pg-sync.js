@@ -22,17 +22,23 @@ const normalizeSince = (since) => {
   return Math.floor(n);
 };
 
-const resolveUserContactId = (userCtx) => {
+// PoC authorization scope: the user's "place" — facility_id on the
+// user-settings doc — is the root of their authorized subject set
+// (the place itself + every contact whose lineage contains it). Using
+// `contact_id` (the user's own person doc) would only authorize the
+// user for themselves; the place is what brings in the household and
+// patient descendants.
+const resolveUserPlaceId = (userCtx) => {
   if (!userCtx) {
     return null;
-  }
-  if (userCtx.contact_id) {
-    return userCtx.contact_id;
   }
   if (Array.isArray(userCtx.facility_id)) {
     return userCtx.facility_id[0] || null;
   }
-  return userCtx.facility_id || null;
+  if (userCtx.facility_id) {
+    return userCtx.facility_id;
+  }
+  return userCtx.contact_id || null;
 };
 
 const toResponseDoc = (row) => {
@@ -58,13 +64,13 @@ const getMaxSeq = async () => {
  */
 const getDocs = async (userCtx, since) => {
   const safeSince = normalizeSince(since);
-  const contactId = resolveUserContactId(userCtx);
-  if (!contactId) {
+  const placeId = resolveUserPlaceId(userCtx);
+  if (!placeId) {
     const lastSeq = Math.max(safeSince, await getMaxSeq());
     return { docs: [], last_seq: lastSeq };
   }
 
-  const result = await pgPool.query(SELECT_SQL, [safeSince, contactId]);
+  const result = await pgPool.query(SELECT_SQL, [safeSince, placeId]);
   const rows = result?.rows || [];
   const docs = rows.map(toResponseDoc);
   const last_seq = rows.length
@@ -76,5 +82,5 @@ const getDocs = async (userCtx, since) => {
 
 module.exports = {
   getDocs,
-  _resolveUserContactId: resolveUserContactId,
+  _resolveUserPlaceId: resolveUserPlaceId,
 };
