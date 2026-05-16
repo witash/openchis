@@ -1,41 +1,30 @@
 'use strict';
 
-// One virtual user. The runner invokes this in-process — one Promise per
-// user — and supplies a sendMessage callback that funnels metric rows
-// into the shared buffer. We keep all logic in `runClient` and let it
-// accept injectable dependencies (PouchDB constructor, fetch, replicate)
-// so the unit tests can drive it without real network IO.
+// One virtual user, in-process. Builds a memory PouchDB, invokes the
+// pg-sync driver, and emits a metric row.
 
-const nairobi = require('./protocols/nairobi');
 const pgSync = require('./protocols/pg-sync');
 
 const buildLocalPouch = (PouchDB, name) => new PouchDB(name, { adapter: 'memory', auto_compaction: true });
 
-const runSync = async ({ protocol, local, remote, replicateFn, baseUrl, user, fetchFn, since }) => {
-  if (protocol === 'nairobi') {
-    return nairobi.sync({ remote, local, replicateFn, baseUrl, user, fetchFn, since });
+const runSync = async ({ protocol, local, baseUrl, user, fetchFn }) => {
+  if (protocol !== 'pg-sync') {
+    throw new Error(`unknown protocol: ${protocol}`);
   }
-  if (protocol === 'pg-sync') {
-    return pgSync.sync({ local, baseUrl, user, fetchFn });
-  }
-  throw new Error(`unknown protocol: ${protocol}`);
+  return pgSync.sync({ local, baseUrl, user, fetchFn });
 };
 
 const runClient = async (opts) => {
   const {
     PouchDB,
     fetchFn,
-    replicateFn,
     sendMessage,
-    spec, // { id, username, password, scenario, protocol, syncs: [{ kind, since? }] }
+    spec, // { id, username, password, scenario, protocol, syncs: [{ kind }] }
     baseUrl,
   } = opts;
 
   const localName = `perf-sync-${spec.id}`;
   const local = buildLocalPouch(PouchDB, localName);
-  const remote = spec.protocol === 'nairobi'
-    ? nairobi.makeRemote(PouchDB, baseUrl, { username: spec.username, password: spec.password })
-    : null;
 
   const results = [];
   try {
@@ -46,12 +35,9 @@ const runClient = async (opts) => {
         const out = await runSync({
           protocol: spec.protocol,
           local,
-          remote,
-          replicateFn,
           baseUrl,
           user: { username: spec.username, password: spec.password },
           fetchFn,
-          since: syncCfg.since,
         });
         row = {
           scenario: spec.scenario,
@@ -81,8 +67,6 @@ const runClient = async (opts) => {
       results.push(row);
     }
   } finally {
-    // PouchDB in-memory dbs are heap-only, but destroying releases
-    // event-emitter listeners promptly under high fan-out.
     try {
       await local.destroy();
     } catch (_destroyErr) { /* best effort */ }

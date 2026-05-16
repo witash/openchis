@@ -65,3 +65,6 @@ release-notes.md
 .agents
 TASK_STATE.md
 AGENT_ASSIGNMENT.md
+/tests/perf-sync/logs/
+/tests/perf-sync/results/
+/test-data-generator/
