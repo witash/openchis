@@ -5,15 +5,22 @@ const SELECT_CONTACTS_BY_IDS = 'SELECT id, lineage FROM contacts WHERE id = ANY(
 
 // Look up parents in a single query and stamp `lineage` onto each contact
 // record. Lineage for a contact is `[parentId, ...parentLineage]`. When a
-// parent is not (yet) in the contacts table, fall back to `[parentId]`; a
-// later parent write/cascade will repair it. Contacts with no parent get [].
+// parent is in the same batch as its child, the child picks up the parent's
+// just-computed lineage (test-data-generator and CouchDB changes feeds emit
+// in topological parent-before-child order). When a parent is missing
+// entirely, fall back to `[parentId]`; a later parent write/cascade will
+// repair it. Contacts with no parent get [].
 const stampLineages = async (records, pgClient) => {
   const contactRecords = records.filter(r => r.contact);
   if (!contactRecords.length) {
     return;
   }
+  const inBatch = new Set(contactRecords.map(r => r.contact.id));
   const parentIds = [...new Set(
-    contactRecords.map(r => r.contact.parent).filter(Boolean)
+    contactRecords
+      .map(r => r.contact.parent)
+      .filter(Boolean)
+      .filter(id => !inBatch.has(id))
   )];
   const parentLineages = {};
   if (parentIds.length) {
@@ -32,6 +39,7 @@ const stampLineages = async (records, pgClient) => {
     } else {
       r.contact.lineage = [parent];
     }
+    parentLineages[r.contact.id] = r.contact.lineage;
   }
 };
 
