@@ -9,6 +9,8 @@ const CSV_HEADER = [
   'docs_pulled',
   'docs_pushed',
   'elapsed_ms',
+  'push_ms',
+  'pull_ms',
   'error',
 ];
 

@@ -52,8 +52,9 @@ const printHelp = () => {
     ...Object.keys(SCENARIOS).map((s) => `  ${s}`),
     '',
     'Options:',
-    '  --users=<n>             concurrent virtual users (default 1; Phase A is 1)',
-    '  --protocol=pg-sync      protocol to test (only pg-sync in Phase A)',
+    '  --users=<n>             concurrent virtual users (default 1)',
+    '  --protocol=pg-sync      protocol to test (pg-sync or nairobi; ignored by compare-protocols)',
+    '  --pending-uploads=<n>   pending docs to seed in each user\'s local Pouch before sync (default 0)',
     '  --run-id=<id>           label baked into the CHW username (default a timestamp)',
     '  --config=<path>         JSON config (default tests/perf-sync/config.json)',
     '',
@@ -84,12 +85,18 @@ const buildContext = (parsed) => {
     throw new Error(`unknown protocol: ${protoArg} (supported: pg-sync, nairobi)`);
   }
   const runId = String(parsed.flags['run-id'] || Date.now());
+  const pendingRaw = parsed.flags['pending-uploads'];
+  const pendingUploads = pendingRaw === undefined || pendingRaw === true ? 0 : parseInt(pendingRaw, 10);
+  if (!Number.isFinite(pendingUploads) || pendingUploads < 0) {
+    throw new Error(`--pending-uploads must be a non-negative integer (got ${pendingRaw})`);
+  }
   return {
     baseUrl: config.url,
     admin: config.admin,
     userCount,
     protocol,
     runId,
+    pendingUploads,
   };
 };
 

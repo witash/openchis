@@ -50,15 +50,7 @@ const runProtocol = async ({ PouchDB, baseUrl, user, runId, protocol }) => {
     if (protocol === 'pg-sync') {
       await pgSync.sync({ local, baseUrl, user, fetchFn: globalThis.fetch });
     } else if (protocol === 'nairobi') {
-      const remote = nairobi.makeRemote(PouchDB, baseUrl, user);
-      await nairobi.sync({
-        remote,
-        local,
-        replicateFn: PouchDB.replicate.bind(PouchDB),
-        baseUrl,
-        user,
-        fetchFn: globalThis.fetch,
-      });
+      await nairobi.sync({ local, baseUrl, user, fetchFn: globalThis.fetch });
     } else {
       throw new Error(`compare-protocols: unknown protocol ${protocol}`);
     }

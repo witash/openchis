@@ -24,7 +24,7 @@ describe('pg-sync service', () => {
       const result = await pgSync.getDocs({ contact_id: 'contact-A' }, 3);
 
       expect(query.callCount).to.equal(1);
-      expect(query.args[0][1]).to.deep.equal([3, 'contact-A']);
+      expect(query.args[0][1]).to.deep.equal([3, 'contact-A', '']);
       expect(result.docs).to.deep.equal([
         { _id: 'doc-1', _rev: '1-abc' },
         { _id: 'doc-2', _rev: '1-abc' },
@@ -39,7 +39,7 @@ describe('pg-sync service', () => {
 
       const result = await pgSync.getDocs({ facility_id: ['facility-X'] }, 0);
 
-      expect(q.firstCall.args[1]).to.deep.equal([0, 'facility-X']);
+      expect(q.firstCall.args[1]).to.deep.equal([0, 'facility-X', '']);
       expect(result.docs).to.deep.equal([]);
       expect(result.last_seq).to.equal(0);
     });
@@ -54,7 +54,18 @@ describe('pg-sync service', () => {
       expect(sql).to.match(/seq\s*>\s*\$1/);
       expect(sql).to.match(/subject\s*=\s*\$2/);
       expect(sql).to.match(/\$2\s*=\s*ANY\s*\(\s*c\.lineage\s*\)/);
+      expect(sql).to.match(/subject\s*=\s*'_all'/);
+      expect(sql).to.match(/subject\s*=\s*\$3/);
       expect(sql).to.match(/ORDER BY md\.seq/i);
+    });
+
+    it('passes the user-settings id as $3 so per-user docs (tasks) match', async () => {
+      const q = sinon.stub(pgPool, 'query').resolves({ rows: [] });
+      q.onSecondCall().resolves({ rows: [{ last_seq: '0' }] });
+
+      await pgSync.getDocs({ contact_id: 'contact-A', name: 'alice' }, 0);
+
+      expect(q.firstCall.args[1]).to.deep.equal([0, 'contact-A', 'org.couchdb.user:alice']);
     });
 
     it('marks tombstones with _deleted: true', async () => {
@@ -129,14 +140,14 @@ describe('pg-sync service', () => {
       q.onSecondCall().resolves({ rows: [{ last_seq: '0' }] });
 
       await pgSync.getDocs({ contact_id: 'c' }, -5);
-      expect(q.firstCall.args[1]).to.deep.equal([0, 'c']);
+      expect(q.firstCall.args[1]).to.deep.equal([0, 'c', '']);
 
       q.resetHistory();
       q.onFirstCall().resolves({ rows: [] });
       q.onSecondCall().resolves({ rows: [{ last_seq: '0' }] });
 
       await pgSync.getDocs({ contact_id: 'c' }, 'not a number');
-      expect(q.firstCall.args[1]).to.deep.equal([0, 'c']);
+      expect(q.firstCall.args[1]).to.deep.equal([0, 'c', '']);
     });
 
     it('does authorize an in-lineage doc and excludes out-of-lineage docs', async () => {
@@ -168,6 +179,71 @@ describe('pg-sync service', () => {
       // last_seq matches the last row's seq for each user
       expect(a.last_seq).to.equal(2);
       expect(b.last_seq).to.equal(3);
+    });
+
+    it('resolves attachment stubs via CouchDB _bulk_get before responding', async () => {
+      const rows = [
+        makeRow('plain-doc', '1', '_all', { docExtra: { type: 'data_record' } }),
+        makeRow('form:registration', '2', '_all', {
+          docExtra: {
+            type: 'form',
+            _attachments: { 'form.xml': { stub: true, content_type: 'application/xml', length: 42 } },
+          },
+        }),
+      ];
+      sinon.stub(pgPool, 'query').resolves({ rows });
+
+      const bulkGet = sinon.stub().resolves({
+        results: [{
+          id: 'form:registration',
+          docs: [{
+            ok: {
+              _id: 'form:registration',
+              _rev: '1-abc',
+              type: 'form',
+              _attachments: {
+                'form.xml': {
+                  content_type: 'application/xml',
+                  digest: 'md5-xyz',
+                  data: 'PGZvcm0+PC9mb3JtPg==',
+                },
+              },
+            },
+          }],
+        }],
+      });
+
+      const result = await pgSync._resolveAttachments(rows.map(r => r.doc), { medicDb: { bulkGet } });
+
+      expect(bulkGet.callCount).to.equal(1);
+      const bulkGetArg = bulkGet.firstCall.args[0];
+      expect(bulkGetArg.attachments).to.equal(true);
+      expect(bulkGetArg.docs).to.deep.equal([{ id: 'form:registration', rev: '1-abc' }]);
+
+      expect(result[0]).to.deep.equal({ _id: 'plain-doc', _rev: '1-abc', type: 'data_record' });
+      expect(result[1]._attachments['form.xml'].data).to.equal('PGZvcm0+PC9mb3JtPg==');
+      expect(result[1]._attachments['form.xml'].stub).to.equal(undefined);
+    });
+
+    it('skips the bulkGet round-trip when no doc has attachment stubs', async () => {
+      const docs = [
+        { _id: 'a', _rev: '1', type: 'person' },
+        { _id: 'b', _rev: '1', type: 'task' },
+      ];
+      const bulkGet = sinon.stub();
+      const out = await pgSync._resolveAttachments(docs, { medicDb: { bulkGet } });
+      expect(bulkGet.callCount).to.equal(0);
+      expect(out).to.equal(docs);
+    });
+
+    it('skips deleted docs even if they carry attachment metadata', async () => {
+      const docs = [
+        { _id: 'tombstone', _rev: '2', _deleted: true, _attachments: { x: { stub: true } } },
+      ];
+      const bulkGet = sinon.stub();
+      const out = await pgSync._resolveAttachments(docs, { medicDb: { bulkGet } });
+      expect(bulkGet.callCount).to.equal(0);
+      expect(out[0]._deleted).to.equal(true);
     });
   });
 });
