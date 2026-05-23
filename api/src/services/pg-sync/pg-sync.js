@@ -1,14 +1,23 @@
+const db = require('../../db');
 const pgPool = require('./pg-pool');
 
-// Authorization rule (PoC): a user is authorized for a document when the
-// user's contact ID is the doc's `subject`, or appears in the `lineage` of
-// the contact named by `subject`. See PROJECT.md "Authorization in the PoC".
+// Authorization rule (PoC): a user is authorized for a document when
+//   - the user's place is the doc's `subject` (or in `c.lineage`), or
+//   - the doc has `subject = '_all'` — the sentinel the transform stamps
+//     onto docs that every user can replicate (settings, branding, forms,
+//     translations, _design/medic-client). Mirrors webapp's nairobi
+//     authorization which seeds `subjectIds` with `_all`, or
+//   - the doc has `subject = $3` — the user's user-settings id
+//     (`org.couchdb.user:<name>`). Tasks (and other per-user docs) are
+//     keyed by this id; the view does the same via the user's
+//     `subjectIds`.
+// See PROJECT.md "Authorization in the PoC".
 const SELECT_SQL = `
   SELECT md.doc, md.seq, md.deleted
   FROM medic_documents md
   LEFT JOIN contacts c ON c.id = md.subject
   WHERE md.seq > $1
-    AND (md.subject = $2 OR $2 = ANY(c.lineage))
+    AND (md.subject = $2 OR $2 = ANY(c.lineage) OR md.subject = '_all' OR md.subject = $3)
   ORDER BY md.seq ASC
 `;
 
@@ -49,6 +58,59 @@ const toResponseDoc = (row) => {
   return doc;
 };
 
+const hasAttachmentStub = (doc) => {
+  if (!doc || !doc._attachments) {
+    return false;
+  }
+  for (const name of Object.keys(doc._attachments)) {
+    const att = doc._attachments[name];
+    if (att && att.stub) {
+      return true;
+    }
+  }
+  return false;
+};
+
+// The mirror stores the doc body as it arrives on the changes feed, where
+// `_attachments` is a stubs-only metadata block. PouchDB on the client side
+// rejects `bulkDocs(new_edits: false)` on a stubbed doc when it can't find
+// the underlying binary locally, so we re-hydrate attachments from CouchDB
+// before returning. Mirrors what nairobi's `_bulk_get?attachments=true`
+// call already does for its clients.
+const resolveAttachments = async (docs, { medicDb = db.medic } = {}) => {
+  const stubIndices = [];
+  const bulkGetSpec = [];
+  for (let i = 0; i < docs.length; i++) {
+    const doc = docs[i];
+    if (!doc || doc._deleted) {
+      continue;
+    }
+    if (hasAttachmentStub(doc)) {
+      stubIndices.push(i);
+      bulkGetSpec.push({ id: doc._id, rev: doc._rev });
+    }
+  }
+  if (!stubIndices.length) {
+    return docs;
+  }
+
+  const response = await medicDb.bulkGet({ docs: bulkGetSpec, attachments: true, revs: true });
+  const resultsById = new Map();
+  for (const r of (response && response.results) || []) {
+    const ok = r && r.docs && r.docs[0] && r.docs[0].ok;
+    if (ok) {
+      resultsById.set(r.id, ok);
+    }
+  }
+  for (const idx of stubIndices) {
+    const inline = resultsById.get(docs[idx]._id);
+    if (inline) {
+      docs[idx] = inline;
+    }
+  }
+  return docs;
+};
+
 const getMaxSeq = async () => {
   const result = await pgPool.query(MAX_SEQ_SQL);
   const row = result?.rows?.[0];
@@ -69,18 +131,22 @@ const getDocs = async (userCtx, since) => {
     const lastSeq = Math.max(safeSince, await getMaxSeq());
     return { docs: [], last_seq: lastSeq };
   }
+  const userSettingsId = userCtx && userCtx.name ? `org.couchdb.user:${userCtx.name}` : '';
 
-  const result = await pgPool.query(SELECT_SQL, [safeSince, placeId]);
+  const result = await pgPool.query(SELECT_SQL, [safeSince, placeId, userSettingsId]);
   const rows = result?.rows || [];
   const docs = rows.map(toResponseDoc);
+  const resolved = await resolveAttachments(docs);
   const last_seq = rows.length
     ? Number(rows[rows.length - 1].seq)
     : Math.max(safeSince, await getMaxSeq());
 
-  return { docs, last_seq };
+  return { docs: resolved, last_seq };
 };
 
 module.exports = {
   getDocs,
   _resolveUserPlaceId: resolveUserPlaceId,
+  _resolveAttachments: resolveAttachments,
+  _hasAttachmentStub: hasAttachmentStub,
 };

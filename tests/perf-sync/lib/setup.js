@@ -98,6 +98,31 @@ const cleanupStaleUserDocs = async ({ baseUrl, admin, runId, userCount, fetchFn 
   }
 };
 
+// After setup, the harness needs each CHW's contact_id (the person doc the
+// CHW points at) so the local-seeder can stamp pending uploads with the
+// correct contact. The user-settings doc in `medic` carries it under
+// `_id: org.couchdb.user:<username>` with `contact_id: <uuid>`.
+const fetchUserContactMap = async ({ baseUrl, admin, usernames, fetchFn = globalThis.fetch }) => {
+  const auth = 'Basic ' + Buffer.from(`${admin.username}:${admin.password}`).toString('base64');
+  const headers = { Authorization: auth };
+  const base = baseUrl.replace(/\/+$/, '');
+  const out = new Map();
+  for (const username of usernames) {
+    const docId = `org.couchdb.user:${username}`;
+    const url = `${base}/medic/${encodeURIComponent(docId)}`;
+    const res = await fetchFn(url, { headers });
+    if (!res.ok) {
+      throw new Error(`perf-sync setup: GET ${url} → ${res.status}`);
+    }
+    const doc = await res.json();
+    if (!doc.contact_id) {
+      throw new Error(`perf-sync setup: user-settings ${docId} has no contact_id`);
+    }
+    out.set(username, doc.contact_id);
+  }
+  return out;
+};
+
 const runSetup = async (opts) => {
   const {
     baseUrl,
@@ -162,6 +187,7 @@ const runSetup = async (opts) => {
 module.exports = {
   buildCouchUrl,
   cleanupStaleUserDocs,
+  fetchUserContactMap,
   runSetup,
   resolveTdgRoot,
   stitchPerfUsernames,

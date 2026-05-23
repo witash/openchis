@@ -1,23 +1,21 @@
 'use strict';
 
-// Nairobi protocol driver — mirrors the real CHT bootstrapper at
-// webapp/src/js/bootstrapper/initial-replication.js:
+// Nairobi pull driver — ported verbatim from webapp's ReplicationService
+// (webapp/src/ts/services/replication.service.ts).
 //
-//   1. GET /api/v1/replication/get-ids  -> { doc_ids_revs, last_seq, ... }
-//   2. diff against the local PouchDB's allDocs to drop already-present revs
-//   3. for each batch of BATCH_SIZE missing pairs:
-//        POST /medic/_bulk_get?revs=true&attachments=true { docs: batch }
-//        local.bulkDocs(docs, { new_edits: false })
+// Sequence per pull:
+//   1. GET /api/v1/replication/get-ids      -> { doc_ids_revs, use_pg_sync }
+//   2. local.allDocs() to build the localIdRevMap
+//   3. Missing docs: for each batch of 100 from remoteDocIdsRevs that the
+//      local doesn't have at the same rev, POST /medic/_bulk_get and
+//      bulkDocs(new_edits: false) the results
+//   4. Deletes: for each batch of 100 local ids not in remoteIdRevMap,
+//      POST /api/v1/replication/get-deletes and bulkDocs the tombstones
 //
-// Earlier versions of this file called PouchDB.replicate(remote, local)
-// which pulled via /medic/_changes. CHT's _changes proxy filters every
-// doc in the medic db per-user, so for a fresh test user with no
-// authorized docs it scans the entire database — effectively an infinite
-// loop. Real online clients never bootstrap via _changes; we don't either.
-//
-// Ongoing syncs (kind: 'ongoing' with a since cursor) still use
-// PouchDB.replicate because by then the user has bootstrapped and the
-// _changes feed only carries the delta from `since`.
+// The "ongoing" path no longer uses PouchDB.replicate via the _changes
+// feed — the webapp shipped this algorithm for both initial and ongoing
+// syncs. Repeat calls naturally cheapen because filterMissing collapses
+// to an empty list once the local mirror is up to date.
 
 const BATCH_SIZE = 100;
 
@@ -66,15 +64,15 @@ const fetchIds = async ({ fetchFn, baseUrl, user }) => {
   return res.json();
 };
 
-const filterMissing = async (local, idsRevs) => {
-  const localResp = await local.allDocs();
-  const localRevs = new Map();
-  for (const row of localResp.rows) {
+const buildLocalIdRevMap = async (local) => {
+  const localDocs = await local.allDocs();
+  const map = {};
+  for (const row of localDocs.rows) {
     if (row && row.value && row.value.rev) {
-      localRevs.set(row.id, row.value.rev);
+      map[row.id] = row.value.rev;
     }
   }
-  return idsRevs.filter(({ id, rev }) => localRevs.get(id) !== rev);
+  return map;
 };
 
 const fetchBatchDocs = async ({ fetchFn, baseUrl, user, batch }) => {
@@ -98,48 +96,76 @@ const fetchBatchDocs = async ({ fetchFn, baseUrl, user, batch }) => {
     .filter(Boolean);
 };
 
-const initialSync = async ({ local, baseUrl, user, fetchFn, batchSize = BATCH_SIZE }) => {
-  const idsResp = await fetchIds({ fetchFn, baseUrl, user });
-  if (idsResp.use_pg_sync) {
-    // Server has flipped the flag; the nairobi protocol can't run.
-    throw new Error('nairobi: server returned use_pg_sync=true — disable pg_sync to measure this protocol');
-  }
-  const missing = await filterMissing(local, idsResp.doc_ids_revs || []);
-  let pulled = 0;
-  for (let i = 0; i < missing.length; i += batchSize) {
-    const batch = missing.slice(i, i + batchSize);
+const getMissingDocs = async ({ local, fetchFn, baseUrl, user, localIdRevMap, remoteDocIdsRevs }) => {
+  const toDownload = remoteDocIdsRevs.filter(({ id, rev }) => !localIdRevMap[id] || localIdRevMap[id] !== rev);
+  const total = toDownload.length;
+  for (let i = 0; i < toDownload.length; i += BATCH_SIZE) {
+    const batch = toDownload.slice(i, i + BATCH_SIZE);
     const docs = await fetchBatchDocs({ fetchFn, baseUrl, user, batch });
     if (docs.length) {
       await local.bulkDocs(docs, { new_edits: false });
-      pulled += docs.length;
     }
   }
-  return { docs_pulled: pulled, last_seq: idsResp.last_seq };
+  return total;
 };
 
-const ongoingSync = async ({ remote, local, replicateFn, since }) => {
-  const result = await replicateFn(remote, local, {
-    since,
-    batch_size: BATCH_SIZE,
+const fetchDeleteList = async ({ fetchFn, baseUrl, user, batch }) => {
+  const res = await fetchFn(`${baseUrl}/api/v1/replication/get-deletes`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: buildAuthHeader(user),
+    },
+    body: JSON.stringify({ doc_ids: batch }),
   });
-  return {
-    docs_pulled: result && Number.isFinite(result.docs_written) ? result.docs_written : 0,
-    last_seq: result && (result.last_seq !== undefined) ? result.last_seq : since,
-  };
+  if (!res || !res.ok) {
+    const status = res && res.status;
+    const text = res && typeof res.text === 'function' ? await res.text() : '';
+    throw new Error(`get-deletes failed status=${status} body=${text}`);
+  }
+  const body = await res.json();
+  return body.doc_ids || [];
 };
 
-const sync = async ({ remote, local, replicateFn, baseUrl, user, fetchFn, since }) => {
+const getDeletesAndPurges = async ({ local, fetchFn, baseUrl, user, localIdRevMap, remoteIdRevMap }) => {
+  const missingRemoteIds = Object.keys(localIdRevMap).filter((id) => !remoteIdRevMap[id]);
+  let deleted = 0;
+  for (let i = 0; i < missingRemoteIds.length; i += BATCH_SIZE) {
+    const batch = missingRemoteIds.slice(i, i + BATCH_SIZE);
+    const idsToDelete = await fetchDeleteList({ fetchFn, baseUrl, user, batch });
+    if (!idsToDelete.length) {
+      continue;
+    }
+    const tombstones = idsToDelete.map((id) => ({
+      _id: id,
+      _rev: localIdRevMap[id],
+      _deleted: true,
+      purged: true,
+    }));
+    await local.bulkDocs(tombstones);
+    deleted += tombstones.length;
+  }
+  return deleted;
+};
+
+const sync = async ({ local, baseUrl, user, fetchFn }) => {
   const start = Date.now();
-  // `since` distinguishes the two modes: initial sync has no cursor; an
-  // ongoing sync resumes from a known seq.
-  const out = since === undefined
-    ? await initialSync({ local, baseUrl, user, fetchFn })
-    : await ongoingSync({ remote, local, replicateFn, since });
+  const idsResp = await fetchIds({ fetchFn, baseUrl, user });
+  if (idsResp && idsResp.use_pg_sync) {
+    throw new Error('nairobi: server returned use_pg_sync=true — disable pg_sync to measure this protocol');
+  }
+  const remoteDocIdsRevs = (idsResp && idsResp.doc_ids_revs) || [];
+  const localIdRevMap = await buildLocalIdRevMap(local);
+  const remoteIdRevMap = {};
+  for (const { id, rev } of remoteDocIdsRevs) {
+    remoteIdRevMap[id] = rev;
+  }
+  const downloaded = await getMissingDocs({ local, fetchFn, baseUrl, user, localIdRevMap, remoteDocIdsRevs });
+  const deleted = await getDeletesAndPurges({ local, fetchFn, baseUrl, user, localIdRevMap, remoteIdRevMap });
   return {
     elapsed_ms: Date.now() - start,
-    docs_pulled: out.docs_pulled,
-    docs_pushed: 0,
-    last_seq: out.last_seq,
+    docs_pulled: downloaded + deleted,
+    last_seq: idsResp && idsResp.last_seq,
   };
 };
 
@@ -147,11 +173,12 @@ module.exports = {
   BATCH_SIZE,
   buildAuthFetch,
   buildAuthHeader,
+  buildLocalIdRevMap,
   fetchBatchDocs,
+  fetchDeleteList,
   fetchIds,
-  filterMissing,
-  initialSync,
+  getDeletesAndPurges,
+  getMissingDocs,
   makeRemote,
-  ongoingSync,
   sync,
 };

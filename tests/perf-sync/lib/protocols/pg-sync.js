@@ -1,59 +1,39 @@
 'use strict';
 
-// Postgres-backed sync protocol driver.
+// Pg-sync pull driver — ported verbatim from webapp's PgReplicationService
+// (webapp/src/ts/services/pg-replication.service.ts).
 //
 // Wire shape:
 //   POST /api/v1/pg-sync { since: <bigint> }
 //   -> { docs: [...], last_seq: <bigint> }
 //
-// Tombstones come back as docs with _deleted: true. We partition them locally
-// so that bulkDocs can both upsert the live docs (new_edits: false) and apply
-// the deletes. The since cursor is persisted to a _local/ PouchDB doc so
-// ongoing syncs resume from the right point.
+// Two notable webapp-faithful details:
+//   1. The cursor lives at `_local/medic-pg-sync-state` (same id as webapp).
+//   2. The response `docs` array is fed to `bulkDocs(docs, {new_edits:false})`
+//      whole — PouchDB handles `_deleted: true` entries the same way as
+//      live docs. No partition step.
 
-const STATE_DOC_ID = '_local/perf-pg-sync-state';
+const STATE_DOC_ID = '_local/medic-pg-sync-state';
 
 const buildAuthHeader = (user) => 'Basic ' + Buffer.from(`${user.username}:${user.password}`).toString('base64');
 
-const readSince = async (local) => {
+const getStateDoc = async (local) => {
   try {
-    const doc = await local.get(STATE_DOC_ID);
-    if (doc && Number.isFinite(Number(doc.last_seq))) {
-      return Number(doc.last_seq);
-    }
-    return 0;
+    return await local.get(STATE_DOC_ID);
   } catch (err) {
     if (err && (err.status === 404 || err.name === 'not_found')) {
-      return 0;
+      return { _id: STATE_DOC_ID };
     }
     throw err;
   }
 };
 
-const writeSince = async (local, lastSeq) => {
-  let existing;
-  try {
-    existing = await local.get(STATE_DOC_ID);
-  } catch (err) {
-    if (!(err && (err.status === 404 || err.name === 'not_found'))) {
-      throw err;
-    }
+const setLastSeq = async (local, existing, seq) => {
+  if (seq === undefined || seq === null) {
+    return;
   }
-  const next = Object.assign({}, existing || { _id: STATE_DOC_ID }, { last_seq: lastSeq });
+  const next = Object.assign({}, existing, { last_seq: seq });
   await local.put(next);
-};
-
-const partitionDocs = (docs) => {
-  const upserts = [];
-  const deletes = [];
-  for (const doc of docs || []) {
-    if (doc && doc._deleted) {
-      deletes.push(doc);
-    } else if (doc) {
-      upserts.push(doc);
-    }
-  }
-  return { upserts, deletes };
 };
 
 const callServer = async ({ fetchFn, baseUrl, user, since }) => {
@@ -76,20 +56,20 @@ const callServer = async ({ fetchFn, baseUrl, user, since }) => {
   return { body, httpElapsed };
 };
 
-const applyToLocal = async (local, partitioned) => {
+const applyDocs = async (local, docs) => {
+  if (!docs.length) {
+    return 0;
+  }
   const bulkStart = Date.now();
-  if (partitioned.upserts.length) {
-    await local.bulkDocs(partitioned.upserts, { new_edits: false });
-  }
-  if (partitioned.deletes.length) {
-    await local.bulkDocs(partitioned.deletes, { new_edits: false });
-  }
+  await local.bulkDocs(docs, { new_edits: false });
   return Date.now() - bulkStart;
 };
 
 const sync = async ({ local, baseUrl, user, fetchFn }) => {
   const start = Date.now();
-  const since = await readSince(local);
+  const state = await getStateDoc(local);
+  const since = state.last_seq === undefined || state.last_seq === null ? 0 : state.last_seq;
+
   let httpElapsed = 0;
   let bulkElapsed = 0;
   let body;
@@ -104,24 +84,20 @@ const sync = async ({ local, baseUrl, user, fetchFn }) => {
     throw err;
   }
 
-  const partitioned = partitionDocs(body.docs);
+  const docs = Array.isArray(body && body.docs) ? body.docs : [];
   try {
-    bulkElapsed = await applyToLocal(local, partitioned);
+    bulkElapsed = await applyDocs(local, docs);
   } catch (err) {
     err.partial = { httpElapsed, bulkElapsed };
     throw err;
   }
 
-  const nextSeq = Number(body.last_seq);
-  if (Number.isFinite(nextSeq)) {
-    await writeSince(local, nextSeq);
-  }
+  await setLastSeq(local, state, body.last_seq);
 
   return {
     elapsed_ms: Date.now() - start,
-    docs_pulled: (body.docs || []).length,
-    docs_pushed: 0,
-    last_seq: Number.isFinite(nextSeq) ? nextSeq : since,
+    docs_pulled: docs.length,
+    last_seq: body.last_seq,
     breakdown: {
       http_ms: httpElapsed,
       bulk_ms: bulkElapsed,
@@ -131,11 +107,10 @@ const sync = async ({ local, baseUrl, user, fetchFn }) => {
 
 module.exports = {
   STATE_DOC_ID,
-  applyToLocal,
+  applyDocs,
   buildAuthHeader,
   callServer,
-  partitionDocs,
-  readSince,
+  getStateDoc,
+  setLastSeq,
   sync,
-  writeSince,
 };

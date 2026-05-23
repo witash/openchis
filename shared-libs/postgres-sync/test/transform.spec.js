@@ -227,11 +227,20 @@ describe('postgres-sync transform', () => {
       expect(getSubject({ type: 'target' })).to.equal(null);
     });
 
-    it('returns null for known system docs', () => {
-      expect(getSubject({ _id: 'settings' })).to.equal(null);
-      expect(getSubject({ _id: 'resources' })).to.equal(null);
-      expect(getSubject({ type: 'translations' })).to.equal(null);
-      expect(getSubject({ type: 'form' })).to.equal(null);
+    it('returns _all for known system docs (matches view key=_all)', () => {
+      expect(getSubject({ _id: 'settings' })).to.equal('_all');
+      expect(getSubject({ _id: 'resources' })).to.equal('_all');
+      expect(getSubject({ type: 'translations' })).to.equal('_all');
+      expect(getSubject({ type: 'form' })).to.equal('_all');
+    });
+
+    it('returns _all for _design/medic-client (matches nairobi hardcoded id)', () => {
+      expect(getSubject({ _id: '_design/medic-client' })).to.equal('_all');
+    });
+
+    it('returns the doc _id for user-settings (matches pg-sync $3 binding)', () => {
+      expect(getSubject({ _id: 'org.couchdb.user:bob', type: 'user-settings' }))
+        .to.equal('org.couchdb.user:bob');
     });
 
     it('returns null for an unknown doc type', () => {
@@ -337,9 +346,9 @@ describe('postgres-sync transform', () => {
       expect(record.medicDocument.doc._rev).to.equal('0');
     });
 
-    it('preserves system docs with subject = null', () => {
+    it('tags system docs with subject = _all', () => {
       const record = transform({ _id: 'settings', _rev: '1-s', type: 'foo' });
-      expect(record.medicDocument.subject).to.equal(null);
+      expect(record.medicDocument.subject).to.equal('_all');
       expect(record).to.not.have.property('contact');
     });
 

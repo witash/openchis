@@ -1,14 +1,15 @@
 'use strict';
 
 // Initial-vs-ongoing scenario: N users, each running TWO consecutive syncs.
-// The first sync uses `since=0`; the second reads `_local/perf-pg-sync-state`
-// (which the protocol driver wrote at the end of sync #1) and asks for
-// `since=last_seq`. With no new docs written between the two calls, the
-// second response must be 0 docs — that proves the cursor round-trip works.
+// The first sync uses `since=0` (pg-sync) or initial get-ids (nairobi); the
+// second sync reads the cursor that sync #1 wrote and asks for the delta.
+// With no new docs written between the two calls, the second response
+// should be effectively empty — that proves the cursor round-trip works
+// and the second sync should be visibly faster.
 //
-// `runClient` in lib/client.js already shares one PouchDB across the
-// entries in `spec.syncs`, so the `_local/perf-pg-sync-state` doc persists
-// between iterations without any extra plumbing.
+// `runClient` in lib/client.js shares one PouchDB across the entries in
+// `spec.syncs`, so the `_local/medic-pg-sync-state` doc (for pg-sync) and
+// the populated allDocs (for nairobi) both persist between iterations.
 
 const runner = require('../lib/runner');
 const setup = require('../lib/setup');
@@ -17,7 +18,7 @@ const { MetricsBuffer, summarizeElapsed } = require('../lib/metrics');
 const SCENARIO = 'initial-vs-ongoing';
 const DEFAULT_CHW_PASSWORD = 'password';
 
-const buildSpecs = ({ runId, userCount, protocol, password = DEFAULT_CHW_PASSWORD }) => {
+const buildSpecs = ({ runId, userCount, protocol, pendingUploads, contactIds, password = DEFAULT_CHW_PASSWORD }) => {
   const specs = [];
   for (let i = 0; i < userCount; i++) {
     const username = `perf-chw-${runId}-${i}`;
@@ -28,6 +29,10 @@ const buildSpecs = ({ runId, userCount, protocol, password = DEFAULT_CHW_PASSWOR
       scenario: SCENARIO,
       protocol,
       syncs: [{ kind: 'initial' }, { kind: 'ongoing' }],
+      pendingUploads: pendingUploads || 0,
+      contactId: contactIds && contactIds.get(username),
+      runId,
+      userIdx: i,
     });
   }
   return specs;
@@ -40,19 +45,26 @@ const summarize = (buffer, scenario, protocol, userCount) => {
   const ongoingRows = rows.filter((r) => r.kind === 'ongoing');
   const initialDocs = initialRows.reduce((a, r) => a + Number(r.docs_pulled || 0), 0);
   const ongoingDocs = ongoingRows.reduce((a, r) => a + Number(r.docs_pulled || 0), 0);
+  const initialPushed = initialRows.reduce((a, r) => a + Number(r.docs_pushed || 0), 0);
+  const ongoingPushed = ongoingRows.reduce((a, r) => a + Number(r.docs_pushed || 0), 0);
   const initialElapsed = summarizeElapsed(initialRows.map((r) => r.elapsed_ms));
   const ongoingElapsed = summarizeElapsed(ongoingRows.map((r) => r.elapsed_ms));
   return `scenario=${scenario} protocol=${protocol} users=${userCount} `
-    + `initial_docs=${initialDocs} ongoing_docs=${ongoingDocs} errors=${errors} `
+    + `initial_docs=${initialDocs} initial_pushed=${initialPushed} `
+    + `ongoing_docs=${ongoingDocs} ongoing_pushed=${ongoingPushed} errors=${errors} `
     + `initial_ms=[p50=${initialElapsed.p50_ms} p95=${initialElapsed.p95_ms} max=${initialElapsed.max_ms}] `
     + `ongoing_ms=[p50=${ongoingElapsed.p50_ms} p95=${ongoingElapsed.p95_ms} max=${ongoingElapsed.max_ms}]`;
 };
 
-const run = async ({ baseUrl, admin, userCount, runId, protocol, runSetupFn }) => {
+const run = async ({ baseUrl, admin, userCount, runId, protocol, pendingUploads, runSetupFn, fetchUserContactMapFn }) => {
   const buffer = new MetricsBuffer();
   const doSetup = runSetupFn || setup.runSetup;
-  await doSetup({ baseUrl, admin, userCount, runId });
-  const specs = buildSpecs({ runId, userCount, protocol });
+  const doContactMap = fetchUserContactMapFn || setup.fetchUserContactMap;
+  const setupResult = await doSetup({ baseUrl, admin, userCount, runId });
+  const contactIds = pendingUploads > 0
+    ? await doContactMap({ baseUrl, admin, usernames: setupResult.usernames })
+    : new Map();
+  const specs = buildSpecs({ runId, userCount, protocol, pendingUploads, contactIds });
   await runner.runAll(specs, baseUrl, buffer);
   const csvFile = runner.csvPath(SCENARIO, protocol);
   runner.writeCsv(csvFile, buffer);

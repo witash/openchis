@@ -22,6 +22,13 @@ const SYSTEM_DOC_IDS = new Set([
   'privacy-policies',
 ]);
 
+// `subject` sentinel for docs every authorized user can replicate.
+// Mirrors the `_all` key emitted by docs_by_replication_key/index.js plus
+// the `_design/medic-client` ddoc that webapp's filterAllowedDocIds adds
+// out-of-band — both nairobi and pg-sync need to surface that ddoc.
+const ALL_SUBJECT = '_all';
+const MEDIC_CLIENT_DDOC = '_design/medic-client';
+
 const isSystemDoc = (doc) => {
   if (!doc) {
     return false;
@@ -30,6 +37,20 @@ const isSystemDoc = (doc) => {
     return true;
   }
   return doc.type === 'form' || doc.type === 'translations';
+};
+
+// True for the union of docs the view's "if (system doc) { key=_all }"
+// branch matches, plus _design/medic-client. The transform stamps
+// `subject = ALL_SUBJECT` for these so the pg-sync query can `OR md.subject
+// = '_all'` and return them to every user.
+const isGlobalDoc = (doc) => {
+  if (!doc) {
+    return false;
+  }
+  if (doc._id === MEDIC_CLIENT_DDOC) {
+    return true;
+  }
+  return isSystemDoc(doc);
 };
 
 const isContactDoc = (doc) => {
@@ -110,10 +131,18 @@ const getSubject = (doc) => {
   if (!doc) {
     return null;
   }
-  if (isSystemDoc(doc)) {
-    return null;
+  if (isGlobalDoc(doc)) {
+    return ALL_SUBJECT;
   }
   if (isContactDoc(doc)) {
+    return doc._id || null;
+  }
+  // user-settings docs are per-user. The id `org.couchdb.user:<name>` is
+  // both the natural subject and the value the pg-sync query passes as $3
+  // (the calling user's userSettingsId). Nairobi gets this doc via its
+  // hardcoded `getUserSettingsId(userCtx.name)` shortcut; we mirror that
+  // here so the query matches without a special case.
+  if (doc.type === 'user-settings') {
     return doc._id || null;
   }
   switch (doc.type) {
@@ -192,7 +221,10 @@ const transform = (doc, options) => {
 };
 
 module.exports = {
+  ALL_SUBJECT,
+  MEDIC_CLIENT_DDOC,
   isContactDoc,
+  isGlobalDoc,
   isSystemDoc,
   getDocType,
   getContactType,
