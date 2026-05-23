@@ -55,7 +55,7 @@ const run = async ({ baseUrl, admin, userCount, runId, protocol, pendingUploads,
     : new Map();
   const specs = buildSpecs({ runId, userCount, protocol, pendingUploads, contactIds });
   await runner.runAll(specs, baseUrl, buffer);
-  const csvFile = runner.csvPath(SCENARIO, protocol);
+  const csvFile = runner.csvPath(SCENARIO, protocol, runId);
   runner.writeCsv(csvFile, buffer);
   process.stdout.write(`baseline: CSV written to ${csvFile}\n`);
   process.stdout.write(summarize(buffer, SCENARIO, protocol, userCount) + '\n');
