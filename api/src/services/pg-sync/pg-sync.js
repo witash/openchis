@@ -1,3 +1,4 @@
+const logger = require('@medic/logger');
 const db = require('../../db');
 const pgPool = require('./pg-pool');
 
@@ -125,22 +126,46 @@ const getMaxSeq = async () => {
  * @returns {Promise<{docs: Object[], last_seq: number}>}
  */
 const getDocs = async (userCtx, since) => {
+  const t0 = Date.now();
   const safeSince = normalizeSince(since);
   const placeId = resolveUserPlaceId(userCtx);
+  const userName = (userCtx && userCtx.name) || 'unknown';
   if (!placeId) {
+    const tMax = Date.now();
     const lastSeq = Math.max(safeSince, await getMaxSeq());
+    logger.info(
+      `pg-sync getDocs: user=${userName} since=${safeSince} n=0 `
+      + `max_seq=${Date.now() - tMax}ms total=${Date.now() - t0}ms skipped=no-place-id`
+    );
     return { docs: [], last_seq: lastSeq };
   }
   const userSettingsId = userCtx && userCtx.name ? `org.couchdb.user:${userCtx.name}` : '';
 
+  const tSql = Date.now();
   const result = await pgPool.query(SELECT_SQL, [safeSince, placeId, userSettingsId]);
+  const sqlMs = Date.now() - tSql;
   const rows = result?.rows || [];
   const docs = rows.map(toResponseDoc);
-  const resolved = await resolveAttachments(docs);
-  const last_seq = rows.length
-    ? Number(rows[rows.length - 1].seq)
-    : Math.max(safeSince, await getMaxSeq());
 
+  const tAtt = Date.now();
+  const resolved = await resolveAttachments(docs);
+  const attachmentsMs = Date.now() - tAtt;
+
+  let maxSeqMs = 0;
+  let last_seq;
+  if (rows.length) {
+    last_seq = Number(rows[rows.length - 1].seq);
+  } else {
+    const tMax = Date.now();
+    last_seq = Math.max(safeSince, await getMaxSeq());
+    maxSeqMs = Date.now() - tMax;
+  }
+
+  logger.info(
+    `pg-sync getDocs: user=${userName} since=${safeSince} n=${resolved.length} `
+    + `sql=${sqlMs}ms attachments=${attachmentsMs}ms max_seq=${maxSeqMs}ms `
+    + `total=${Date.now() - t0}ms`
+  );
   return { docs: resolved, last_seq };
 };
 

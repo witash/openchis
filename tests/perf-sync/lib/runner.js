@@ -13,9 +13,10 @@ const ensureResultsDir = () => {
   }
 };
 
-const csvPath = (scenario, protocol, ts = Date.now()) => {
+const csvPath = (scenario, protocol, label) => {
   ensureResultsDir();
-  return path.join(RESULTS_DIR, `${scenario}-${protocol}-${ts}.csv`);
+  const tag = label === undefined || label === null || label === '' ? String(Date.now()) : String(label);
+  return path.join(RESULTS_DIR, `${scenario}-${protocol}-${tag}.csv`);
 };
 
 const writeCsv = (filePath, buffer) => {
