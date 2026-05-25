@@ -4,9 +4,8 @@ const sinon = require('sinon');
 const pgPool = require('../../../../src/services/pg-sync/pg-pool');
 const pgSync = require('../../../../src/services/pg-sync/pg-sync');
 
-const makeRow = (id, seq, subject, opts = {}) => ({
+const makeRow = (id, opts = {}) => ({
   doc: Object.assign({ _id: id, _rev: '1-abc' }, opts.docExtra || {}),
-  seq,
   deleted: !!opts.deleted,
 });
 
@@ -14,236 +13,76 @@ describe('pg-sync service', () => {
   afterEach(() => sinon.restore());
 
   describe('getDocs', () => {
-    it('queries by contact_id and since, returning docs + last_seq', async () => {
-      const rows = [
-        makeRow('doc-1', '5', 'contact-A'),
-        makeRow('doc-2', '7', 'contact-A'),
-      ];
+    it('queries by user place and returns the authorized doc set', async () => {
+      const rows = [makeRow('doc-1'), makeRow('doc-2')];
       const query = sinon.stub(pgPool, 'query').resolves({ rows });
 
-      const result = await pgSync.getDocs({ contact_id: 'contact-A' }, 3);
+      const result = await pgSync.getDocs({ facility_id: 'place-A', name: 'alice' });
 
       expect(query.callCount).to.equal(1);
-      expect(query.args[0][1]).to.deep.equal([3, 'contact-A', '']);
-      expect(result.docs).to.deep.equal([
-        { _id: 'doc-1', _rev: '1-abc' },
-        { _id: 'doc-2', _rev: '1-abc' },
-      ]);
-      expect(result.last_seq).to.equal(7);
+      expect(query.args[0][1]).to.deep.equal(['place-A', 'org.couchdb.user:alice']);
+      expect(result).to.deep.equal({
+        docs: [
+          { _id: 'doc-1', _rev: '1-abc' },
+          { _id: 'doc-2', _rev: '1-abc' },
+        ],
+      });
     });
 
-    it('uses facility_id when contact_id is missing', async () => {
-      const q = sinon.stub(pgPool, 'query');
-      q.onFirstCall().resolves({ rows: [] });
-      q.onSecondCall().resolves({ rows: [{ last_seq: '0' }] });
-
-      const result = await pgSync.getDocs({ facility_id: ['facility-X'] }, 0);
-
-      expect(q.firstCall.args[1]).to.deep.equal([0, 'facility-X', '']);
-      expect(result.docs).to.deep.equal([]);
-      expect(result.last_seq).to.equal(0);
-    });
-
-    it('SQL filters by since (seq > $1) and by authorization (subject or lineage)', async () => {
+    it('uses the first element of facility_id when it is an array', async () => {
       const q = sinon.stub(pgPool, 'query').resolves({ rows: [] });
-      q.onSecondCall().resolves({ rows: [{ last_seq: '0' }] });
+      await pgSync.getDocs({ facility_id: ['place-X'], name: 'bob' });
+      expect(q.firstCall.args[1]).to.deep.equal(['place-X', 'org.couchdb.user:bob']);
+    });
 
-      await pgSync.getDocs({ contact_id: 'c1' }, 10);
+    it('falls back to contact_id when facility_id is missing', async () => {
+      const q = sinon.stub(pgPool, 'query').resolves({ rows: [] });
+      await pgSync.getDocs({ contact_id: 'contact-A', name: 'eve' });
+      expect(q.firstCall.args[1]).to.deep.equal(['contact-A', 'org.couchdb.user:eve']);
+    });
 
+    it('SQL authorizes by subject, lineage, _all, and user-settings id', async () => {
+      const q = sinon.stub(pgPool, 'query').resolves({ rows: [] });
+      await pgSync.getDocs({ facility_id: 'p', name: 'a' });
       const sql = q.firstCall.args[0];
-      expect(sql).to.match(/seq\s*>\s*\$1/);
-      expect(sql).to.match(/subject\s*=\s*\$2/);
-      expect(sql).to.match(/\$2\s*=\s*ANY\s*\(\s*c\.lineage\s*\)/);
+      expect(sql).to.match(/subject\s*=\s*\$1/);
+      expect(sql).to.match(/\$1\s*=\s*ANY\s*\(\s*c\.lineage\s*\)/);
       expect(sql).to.match(/subject\s*=\s*'_all'/);
-      expect(sql).to.match(/subject\s*=\s*\$3/);
-      expect(sql).to.match(/ORDER BY md\.seq/i);
-    });
-
-    it('passes the user-settings id as $3 so per-user docs (tasks) match', async () => {
-      const q = sinon.stub(pgPool, 'query').resolves({ rows: [] });
-      q.onSecondCall().resolves({ rows: [{ last_seq: '0' }] });
-
-      await pgSync.getDocs({ contact_id: 'contact-A', name: 'alice' }, 0);
-
-      expect(q.firstCall.args[1]).to.deep.equal([0, 'contact-A', 'org.couchdb.user:alice']);
+      expect(sql).to.match(/subject\s*=\s*\$2/);
     });
 
     it('marks tombstones with _deleted: true', async () => {
       const rows = [
-        makeRow('doc-1', '11', 'contact-A', { deleted: true }),
-        makeRow('doc-2', '12', 'contact-A'),
+        makeRow('doc-1', { deleted: true }),
+        makeRow('doc-2'),
       ];
       sinon.stub(pgPool, 'query').resolves({ rows });
 
-      const result = await pgSync.getDocs({ contact_id: 'contact-A' }, 0);
+      const result = await pgSync.getDocs({ facility_id: 'p', name: 'a' });
 
-      expect(result.docs[0]).to.deep.equal({
-        _id: 'doc-1', _rev: '1-abc', _deleted: true
-      });
+      expect(result.docs[0]).to.deep.equal({ _id: 'doc-1', _rev: '1-abc', _deleted: true });
       expect(result.docs[1]).to.deep.equal({ _id: 'doc-2', _rev: '1-abc' });
-      expect(result.last_seq).to.equal(12);
     });
 
     it('preserves _deleted: true already set in the doc body', async () => {
       const rows = [{
         doc: { _id: 'doc-1', _rev: '2-xyz', _deleted: true },
-        seq: '20',
         deleted: true,
       }];
       sinon.stub(pgPool, 'query').resolves({ rows });
 
-      const result = await pgSync.getDocs({ contact_id: 'c' }, 0);
+      const result = await pgSync.getDocs({ facility_id: 'p', name: 'a' });
 
       expect(result.docs).to.deep.equal([
         { _id: 'doc-1', _rev: '2-xyz', _deleted: true },
       ]);
     });
 
-    it('returns last_seq monotonically: never below since when no rows', async () => {
+    it('returns empty docs and issues no query when user has no place', async () => {
       const q = sinon.stub(pgPool, 'query');
-      q.onFirstCall().resolves({ rows: [] });
-      q.onSecondCall().resolves({ rows: [{ last_seq: '5' }] });
-
-      const result = await pgSync.getDocs({ contact_id: 'c' }, 42);
-
-      expect(result.docs).to.deep.equal([]);
-      // 42 (since) is greater than current max (5), so last_seq stays at 42.
-      expect(result.last_seq).to.equal(42);
-    });
-
-    it('returns last_seq monotonically: bumps to current max when ahead of since', async () => {
-      const q = sinon.stub(pgPool, 'query');
-      q.onFirstCall().resolves({ rows: [] });
-      q.onSecondCall().resolves({ rows: [{ last_seq: '99' }] });
-
-      const result = await pgSync.getDocs({ contact_id: 'c' }, 10);
-
-      expect(result.last_seq).to.equal(99);
-    });
-
-    it('returns empty docs and current max seq when user has no contact_id/facility_id', async () => {
-      const q = sinon.stub(pgPool, 'query');
-      q.resolves({ rows: [{ last_seq: '17' }] });
-
-      const result = await pgSync.getDocs({ name: 'nobody' }, 0);
-
-      expect(result.docs).to.deep.equal([]);
-      expect(result.last_seq).to.equal(17);
-      // No row-selection query was issued — only the max-seq query.
-      expect(q.callCount).to.equal(1);
-      expect(q.firstCall.args[0]).to.match(/MAX\(seq\)/);
-    });
-
-    it('treats negative or invalid `since` as 0', async () => {
-      const q = sinon.stub(pgPool, 'query');
-      q.onFirstCall().resolves({ rows: [] });
-      q.onSecondCall().resolves({ rows: [{ last_seq: '0' }] });
-
-      await pgSync.getDocs({ contact_id: 'c' }, -5);
-      expect(q.firstCall.args[1]).to.deep.equal([0, 'c', '']);
-
-      q.resetHistory();
-      q.onFirstCall().resolves({ rows: [] });
-      q.onSecondCall().resolves({ rows: [{ last_seq: '0' }] });
-
-      await pgSync.getDocs({ contact_id: 'c' }, 'not a number');
-      expect(q.firstCall.args[1]).to.deep.equal([0, 'c', '']);
-    });
-
-    it('does authorize an in-lineage doc and excludes out-of-lineage docs', async () => {
-      // The SQL is the authorization mechanism. We assert the mock receives the
-      // expected predicates and only returns docs that match, so two contact
-      // IDs are distinguished by the parameters passed.
-      const allRows = {
-        'user-A': [
-          makeRow('lin-1', '1', 'descendant-of-A'),
-          makeRow('sub-1', '2', 'user-A'),
-        ],
-        'user-B': [
-          makeRow('lin-2', '3', 'descendant-of-B'),
-        ],
-      };
-      sinon.stub(pgPool, 'query').callsFake((sql, params) => {
-        if (sql.includes('MAX(seq)')) {
-          return Promise.resolve({ rows: [{ last_seq: '0' }] });
-        }
-        const [, contactId] = params;
-        return Promise.resolve({ rows: allRows[contactId] || [] });
-      });
-
-      const a = await pgSync.getDocs({ contact_id: 'user-A' }, 0);
-      const b = await pgSync.getDocs({ contact_id: 'user-B' }, 0);
-
-      expect(a.docs.map(d => d._id)).to.deep.equal(['lin-1', 'sub-1']);
-      expect(b.docs.map(d => d._id)).to.deep.equal(['lin-2']);
-      // last_seq matches the last row's seq for each user
-      expect(a.last_seq).to.equal(2);
-      expect(b.last_seq).to.equal(3);
-    });
-
-    it('resolves attachment stubs via CouchDB _bulk_get before responding', async () => {
-      const rows = [
-        makeRow('plain-doc', '1', '_all', { docExtra: { type: 'data_record' } }),
-        makeRow('form:registration', '2', '_all', {
-          docExtra: {
-            type: 'form',
-            _attachments: { 'form.xml': { stub: true, content_type: 'application/xml', length: 42 } },
-          },
-        }),
-      ];
-      sinon.stub(pgPool, 'query').resolves({ rows });
-
-      const bulkGet = sinon.stub().resolves({
-        results: [{
-          id: 'form:registration',
-          docs: [{
-            ok: {
-              _id: 'form:registration',
-              _rev: '1-abc',
-              type: 'form',
-              _attachments: {
-                'form.xml': {
-                  content_type: 'application/xml',
-                  digest: 'md5-xyz',
-                  data: 'PGZvcm0+PC9mb3JtPg==',
-                },
-              },
-            },
-          }],
-        }],
-      });
-
-      const result = await pgSync._resolveAttachments(rows.map(r => r.doc), { medicDb: { bulkGet } });
-
-      expect(bulkGet.callCount).to.equal(1);
-      const bulkGetArg = bulkGet.firstCall.args[0];
-      expect(bulkGetArg.attachments).to.equal(true);
-      expect(bulkGetArg.docs).to.deep.equal([{ id: 'form:registration', rev: '1-abc' }]);
-
-      expect(result[0]).to.deep.equal({ _id: 'plain-doc', _rev: '1-abc', type: 'data_record' });
-      expect(result[1]._attachments['form.xml'].data).to.equal('PGZvcm0+PC9mb3JtPg==');
-      expect(result[1]._attachments['form.xml'].stub).to.equal(undefined);
-    });
-
-    it('skips the bulkGet round-trip when no doc has attachment stubs', async () => {
-      const docs = [
-        { _id: 'a', _rev: '1', type: 'person' },
-        { _id: 'b', _rev: '1', type: 'task' },
-      ];
-      const bulkGet = sinon.stub();
-      const out = await pgSync._resolveAttachments(docs, { medicDb: { bulkGet } });
-      expect(bulkGet.callCount).to.equal(0);
-      expect(out).to.equal(docs);
-    });
-
-    it('skips deleted docs even if they carry attachment metadata', async () => {
-      const docs = [
-        { _id: 'tombstone', _rev: '2', _deleted: true, _attachments: { x: { stub: true } } },
-      ];
-      const bulkGet = sinon.stub();
-      const out = await pgSync._resolveAttachments(docs, { medicDb: { bulkGet } });
-      expect(bulkGet.callCount).to.equal(0);
-      expect(out[0]._deleted).to.equal(true);
+      const result = await pgSync.getDocs({ name: 'nobody' });
+      expect(result).to.deep.equal({ docs: [] });
+      expect(q.callCount).to.equal(0);
     });
   });
 });

@@ -13,8 +13,10 @@ const matchContains = (substr) => sinon.match(
   (value) => typeof value === 'string' && value.includes(substr),
   `query containing "${substr}"`,
 );
-const matchInsertDoc = () => matchContains('INSERT INTO medic_documents');
+const matchInsertDoc = () => matchContains('INSERT INTO documents');
 const matchInsertContacts = () => matchContains('INSERT INTO contacts');
+const matchInsertReports = () => matchContains('INSERT INTO reports');
+const matchInsertTasks = () => matchContains('INSERT INTO tasks');
 const matchSelectParents = () => matchContains('SELECT id, lineage FROM contacts');
 
 describe('postgres-sync transformAndWrite', () => {
@@ -28,7 +30,7 @@ describe('postgres-sync transformAndWrite', () => {
     expect(client.query.callCount).to.equal(0);
   });
 
-  it('writes all non-contact docs in a single medic_documents INSERT', async () => {
+  it('writes data_record docs to documents and reports', async () => {
     const client = makeClient();
     const docs = [
       { _id: 'r1', _rev: '1-a', type: 'data_record', form: 'p', fields: { patient_id: 'pa' } },
@@ -38,13 +40,25 @@ describe('postgres-sync transformAndWrite', () => {
 
     const docInserts = client.query.withArgs(matchInsertDoc()).getCalls();
     expect(docInserts).to.have.length(1);
-    expect(docInserts[0].args[1]).to.have.length(14); // 2 rows × 7 columns
-    expect(docInserts[0].args[1][0]).to.equal('r1');
-    expect(docInserts[0].args[1][7]).to.equal('r2');
+    expect(docInserts[0].args[1]).to.have.length(12); // 2 rows × 6 columns
 
-    // No contact records means no parents lookup and no contacts insert.
+    const reportInserts = client.query.withArgs(matchInsertReports()).getCalls();
+    expect(reportInserts).to.have.length(1);
+    expect(reportInserts[0].args[1]).to.have.length(10); // 2 rows × 5 columns
+
     expect(client.query.withArgs(matchSelectParents()).callCount).to.equal(0);
     expect(client.query.withArgs(matchInsertContacts()).callCount).to.equal(0);
+  });
+
+  it('writes task docs to documents and tasks', async () => {
+    const client = makeClient();
+    await transformAndWrite([
+      { _id: 't1', _rev: '1', type: 'task', owner: 'p1', requester: 'c1', state: 'Ready' },
+    ], client);
+
+    expect(client.query.withArgs(matchInsertDoc()).callCount).to.equal(1);
+    const taskInsert = client.query.withArgs(matchInsertTasks()).firstCall;
+    expect(taskInsert.args[1]).to.deep.equal(['t1', 'p1', 'c1', 'Ready']);
   });
 
   it('looks up parents in one round trip and stamps lineage on contact records', async () => {
@@ -58,23 +72,21 @@ describe('postgres-sync transformAndWrite', () => {
     const docs = [
       { _id: 'c1', _rev: '1', type: 'clinic', name: 'A', parent: { _id: 'h1' } },
       { _id: 'c2', _rev: '1', type: 'clinic', name: 'B', parent: 'h1' },
-      { _id: 'r1', _rev: '1', type: 'district_hospital', name: 'C' }, // no parent
+      { _id: 'r1', _rev: '1', type: 'district_hospital', name: 'C' },
     ];
     await transformAndWrite(docs, client);
 
     const selectCalls = client.query.withArgs(matchSelectParents()).getCalls();
     expect(selectCalls).to.have.length(1);
-    // Parents are deduped and only `h1` is referenced.
     expect(selectCalls[0].args[1]).to.deep.equal([['h1']]);
 
     const contactInserts = client.query.withArgs(matchInsertContacts()).getCalls();
     expect(contactInserts).to.have.length(1);
-    // 3 contacts × 9 cols = 27 params. Column 5 (index 4) per row is lineage.
     const params = contactInserts[0].args[1];
     expect(params).to.have.length(27);
-    expect(params[4]).to.deep.equal(['h1', 'd1']);   // c1: [parent, ...parentLineage]
-    expect(params[13]).to.deep.equal(['h1', 'd1']);  // c2: same parent → same lineage
-    expect(params[22]).to.deep.equal([]);            // r1: no parent → []
+    expect(params[4]).to.deep.equal(['h1', 'd1']);
+    expect(params[13]).to.deep.equal(['h1', 'd1']);
+    expect(params[22]).to.deep.equal([]);
   });
 
   it('falls back to [parentId] when the parent is not in contacts yet', async () => {
@@ -90,7 +102,6 @@ describe('postgres-sync transformAndWrite', () => {
 
   it('threads in-batch ancestors into descendants\' lineage in one pass', async () => {
     const client = makeClient();
-    // None of the parents exist in pg yet — they are all part of this batch.
     client.query.withArgs(matchSelectParents()).resolves({ rows: [] });
     const docs = [
       { _id: 'd1', _rev: '1', type: 'district_hospital' },
@@ -100,31 +111,13 @@ describe('postgres-sync transformAndWrite', () => {
     ];
     await transformAndWrite(docs, client);
 
-    // The SELECT is skipped entirely when every parent is in the batch.
     expect(client.query.withArgs(matchSelectParents()).callCount).to.equal(0);
 
-    // 4 contacts × 9 cols = 36 params. lineage at column index 4 of each row.
     const params = client.query.withArgs(matchInsertContacts()).firstCall.args[1];
-    expect(params[4]).to.deep.equal([]);                       // d1
-    expect(params[13]).to.deep.equal(['d1']);                  // h1
-    expect(params[22]).to.deep.equal(['h1', 'd1']);            // c1
-    expect(params[31]).to.deep.equal(['c1', 'h1', 'd1']);      // p1
-  });
-
-  it('issues exactly one INSERT per table for a mixed batch', async () => {
-    const client = makeClient();
-    client.query.withArgs(matchSelectParents()).resolves({
-      rows: [{ id: 'h1', lineage: [] }],
-    });
-    const docs = [
-      { _id: 'c1', _rev: '1', type: 'clinic', parent: { _id: 'h1' } },
-      { _id: 'r1', _rev: '1', type: 'data_record', form: 'p', fields: { patient_id: 'p1' } },
-      { _id: 'c2', _rev: '1', type: 'clinic', parent: { _id: 'h1' } },
-    ];
-    await transformAndWrite(docs, client);
-
-    expect(client.query.withArgs(matchInsertDoc()).callCount).to.equal(1);
-    expect(client.query.withArgs(matchInsertContacts()).callCount).to.equal(1);
+    expect(params[4]).to.deep.equal([]);
+    expect(params[13]).to.deep.equal(['d1']);
+    expect(params[22]).to.deep.equal(['h1', 'd1']);
+    expect(params[31]).to.deep.equal(['c1', 'h1', 'd1']);
   });
 
   it('skips docs that transform cannot interpret (missing _id/_rev)', async () => {
@@ -138,19 +131,19 @@ describe('postgres-sync transformAndWrite', () => {
     await transformAndWrite(docs, client);
 
     const insert = client.query.withArgs(matchInsertDoc()).firstCall;
-    expect(insert.args[1]).to.have.length(7);
+    expect(insert.args[1]).to.have.length(6);
     expect(insert.args[1][0]).to.equal('good');
   });
 
-  it('writes tombstones (docs with _deleted: true) to medic_documents only', async () => {
+  it('writes tombstones (docs with _deleted: true) to documents only', async () => {
     const client = makeClient();
     await transformAndWrite([
       { _id: 't1', _rev: '3-tomb', _deleted: true },
     ], client);
 
     const insert = client.query.withArgs(matchInsertDoc()).firstCall;
-    expect(insert.args[1][6]).to.equal(true);
-    expect(insert.args[1][4]).to.equal(null); // subject
+    expect(insert.args[1][5]).to.equal(true);  // deleted
+    expect(insert.args[1][3]).to.equal(null);  // subject
     expect(client.query.withArgs(matchInsertContacts()).callCount).to.equal(0);
   });
 

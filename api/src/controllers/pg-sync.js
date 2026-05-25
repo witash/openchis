@@ -7,8 +7,7 @@ module.exports = {
       return serverUtils.notLoggedIn(req, res);
     }
     try {
-      const since = req.body && req.body.since !== undefined ? req.body.since : 0;
-      const result = await pgSync.getDocs(req.userCtx, since);
+      const result = await pgSync.getDocs(req.userCtx);
       return res.json(result);
     } catch (err) {
       return serverUtils.serverError(err, req, res);

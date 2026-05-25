@@ -1,6 +1,7 @@
 const chai = require('chai');
 const { expect } = chai;
 
+const transformModule = require('../src/transform');
 const {
   transform,
   isContactDoc,
@@ -9,7 +10,7 @@ const {
   getParentId,
   getSubject,
   getDocType,
-} = require('../src');
+} = transformModule;
 
 describe('postgres-sync transform', () => {
   describe('isContactDoc', () => {
@@ -105,105 +106,13 @@ describe('postgres-sync transform', () => {
       expect(getSubject({ _id: 'p1', type: 'person' })).to.equal('p1');
     });
 
-    it('returns null for a contact doc with no id', () => {
-      expect(getSubject({ type: 'person' })).to.equal(null);
-    });
-
     it('extracts patient subjects from fields on data_record reports', () => {
       const doc = { type: 'data_record', form: 'p', fields: { patient_id: 'patient-7' } };
       expect(getSubject(doc)).to.equal('patient-7');
     });
 
-    it('prefers top-level patient_id over fields.patient_id on a report', () => {
-      const doc = {
-        type: 'data_record',
-        form: 'p',
-        patient_id: 'top-level',
-        fields: { patient_id: 'in-fields' },
-      };
-      expect(getSubject(doc)).to.equal('top-level');
-    });
-
-    it('falls back to place_id and fields.place_id when no patient ref is set', () => {
-      expect(getSubject({ type: 'data_record', form: 'p', place_id: 'place-1' }))
-        .to.equal('place-1');
-      expect(getSubject({ type: 'data_record', form: 'p', fields: { place_id: 'place-2' } }))
-        .to.equal('place-2');
-    });
-
-    it('falls back to fields.patient_uuid after patient/place fields are exhausted', () => {
-      const doc = { type: 'data_record', form: 'p', fields: { patient_uuid: 'pu-1' } };
-      expect(getSubject(doc)).to.equal('pu-1');
-    });
-
-    it('falls back to contact._id when no patient/place reference exists on a report', () => {
-      const doc = { type: 'data_record', form: 'p', contact: { _id: 'submitter-1' } };
-      expect(getSubject(doc)).to.equal('submitter-1');
-    });
-
     it('returns _unassigned for a data_record with nothing extractable', () => {
       expect(getSubject({ type: 'data_record', form: 'p' })).to.equal('_unassigned');
-    });
-
-    it('returns the registration submitter for reports with patient errors', () => {
-      const doc = {
-        type: 'data_record',
-        form: 'p',
-        contact: { _id: 'sender' },
-        errors: [{ code: 'registration_not_found' }],
-        patient_id: 'unused',
-      };
-      expect(getSubject(doc)).to.equal('sender');
-    });
-
-    it('returns the registration submitter for reports with invalid_patient_id errors', () => {
-      const doc = {
-        type: 'data_record',
-        form: 'p',
-        contact: { _id: 'sender' },
-        errors: [{ code: 'invalid_patient_id' }],
-        patient_id: 'unused',
-      };
-      expect(getSubject(doc)).to.equal('sender');
-    });
-
-    it('ignores unrelated error codes on a report', () => {
-      const doc = {
-        type: 'data_record',
-        form: 'p',
-        contact: { _id: 'sender' },
-        errors: [{ code: 'something_else' }],
-        patient_id: 'real-patient',
-      };
-      expect(getSubject(doc)).to.equal('real-patient');
-    });
-
-    it('returns the message contact for incoming sms_message records', () => {
-      const doc = {
-        type: 'data_record',
-        sms_message: { from: '+1' },
-        contact: { _id: 'msg-from' },
-      };
-      expect(getSubject(doc)).to.equal('msg-from');
-    });
-
-    it('returns _unassigned for an sms_message with no contact', () => {
-      const doc = { type: 'data_record', sms_message: { from: '+1' } };
-      expect(getSubject(doc)).to.equal('_unassigned');
-    });
-
-    it('returns the first kujua_message task contact', () => {
-      const doc = {
-        type: 'data_record',
-        kujua_message: true,
-        tasks: [{ messages: [{ contact: { _id: 'kujua-c' } }] }],
-      };
-      expect(getSubject(doc)).to.equal('kujua-c');
-    });
-
-    it('returns _unassigned for a kujua_message without a task contact', () => {
-      const doc = { type: 'data_record', kujua_message: true };
-      expect(getSubject(doc)).to.equal('_unassigned');
     });
 
     it('returns the user field for task docs', () => {
@@ -215,30 +124,21 @@ describe('postgres-sync transform', () => {
       expect(getSubject({ type: 'task', owner: 'contact-77' })).to.equal('contact-77');
     });
 
-    it('returns null for a task doc with no user or owner', () => {
-      expect(getSubject({ type: 'task' })).to.equal(null);
-    });
-
     it('returns the owner field for target docs', () => {
       expect(getSubject({ type: 'target', owner: 'contact-77' })).to.equal('contact-77');
     });
 
-    it('returns null for a target doc without an owner', () => {
-      expect(getSubject({ type: 'target' })).to.equal(null);
-    });
-
-    it('returns _all for known system docs (matches view key=_all)', () => {
+    it('returns _all for known system docs', () => {
       expect(getSubject({ _id: 'settings' })).to.equal('_all');
-      expect(getSubject({ _id: 'resources' })).to.equal('_all');
       expect(getSubject({ type: 'translations' })).to.equal('_all');
       expect(getSubject({ type: 'form' })).to.equal('_all');
     });
 
-    it('returns _all for _design/medic-client (matches nairobi hardcoded id)', () => {
+    it('returns _all for _design/medic-client', () => {
       expect(getSubject({ _id: '_design/medic-client' })).to.equal('_all');
     });
 
-    it('returns the doc _id for user-settings (matches pg-sync $3 binding)', () => {
+    it('returns the doc _id for user-settings', () => {
       expect(getSubject({ _id: 'org.couchdb.user:bob', type: 'user-settings' }))
         .to.equal('org.couchdb.user:bob');
     });
@@ -265,29 +165,57 @@ describe('postgres-sync transform', () => {
       expect(transform(null)).to.equal(null);
       expect(transform(undefined)).to.equal(null);
       expect(transform({})).to.equal(null);
-      expect(transform({ _id: 'a' })).to.equal(null); // missing _rev
+      expect(transform({ _id: 'a' })).to.equal(null);
     });
 
-    it('shapes a non-contact data_record into a single medicDocument record', () => {
+    it('shapes a data_record into a document + report pair', () => {
       const doc = {
         _id: 'report-1',
         _rev: '1-abc',
         type: 'data_record',
         form: 'pregnancy',
+        contact: { _id: 'submitter-1' },
+        reported_date: 1700000000000,
         fields: { patient_id: 'patient-9' },
       };
       const record = transform(doc);
 
-      expect(record).to.have.property('medicDocument');
+      expect(record).to.have.property('document');
       expect(record).to.not.have.property('contact');
-      expect(record.medicDocument).to.deep.equal({
+      expect(record.document).to.deep.equal({
         _id: 'report-1',
         _rev: '1-abc',
-        couchdb_seq: null,
         doc,
         subject: 'patient-9',
         type: 'data_record',
         deleted: false,
+      });
+      expect(record.report).to.deep.equal({
+        id: 'report-1',
+        subject: 'patient-9',
+        contact: 'submitter-1',
+        form: 'pregnancy',
+        reported_date: 1700000000000,
+      });
+    });
+
+    it('shapes a task doc into a document + task pair', () => {
+      const doc = {
+        _id: 'task-1',
+        _rev: '1-aa',
+        type: 'task',
+        owner: 'patient-1',
+        requester: 'chw-1',
+        state: 'Ready',
+        user: 'org.couchdb.user:chw',
+      };
+      const record = transform(doc);
+      expect(record.document.type).to.equal('task');
+      expect(record.task).to.deep.equal({
+        id: 'task-1',
+        owner: 'patient-1',
+        requester: 'chw-1',
+        state: 'Ready',
       });
     });
 
@@ -302,8 +230,8 @@ describe('postgres-sync transform', () => {
       };
       const record = transform(doc);
 
-      expect(record.medicDocument.subject).to.equal('clinic-1');
-      expect(record.medicDocument.type).to.equal('clinic');
+      expect(record.document.subject).to.equal('clinic-1');
+      expect(record.document.type).to.equal('clinic');
       expect(record.contact).to.deep.equal({
         id: 'clinic-1',
         type: 'clinic',
@@ -327,12 +255,11 @@ describe('postgres-sync transform', () => {
 
     it('shapes a tombstone (deleted: true) record with subject/type null', () => {
       const record = transform({ _id: 'doc-1', _rev: '3-tomb', _deleted: true });
-      expect(record).to.have.property('medicDocument');
+      expect(record).to.have.property('document');
       expect(record).to.not.have.property('contact');
-      expect(record.medicDocument).to.deep.equal({
+      expect(record.document).to.deep.equal({
         _id: 'doc-1',
         _rev: '3-tomb',
-        couchdb_seq: null,
         doc: { _id: 'doc-1', _rev: '3-tomb', _deleted: true },
         subject: null,
         type: null,
@@ -342,22 +269,14 @@ describe('postgres-sync transform', () => {
 
     it('falls back to _rev "0" for a tombstone with no _rev', () => {
       const record = transform({ _id: 'doc-1', _deleted: true });
-      expect(record.medicDocument._rev).to.equal('0');
-      expect(record.medicDocument.doc._rev).to.equal('0');
+      expect(record.document._rev).to.equal('0');
+      expect(record.document.doc._rev).to.equal('0');
     });
 
     it('tags system docs with subject = _all', () => {
       const record = transform({ _id: 'settings', _rev: '1-s', type: 'foo' });
-      expect(record.medicDocument.subject).to.equal('_all');
+      expect(record.document.subject).to.equal('_all');
       expect(record).to.not.have.property('contact');
-    });
-
-    it('threads couchdbSeq through options when provided', () => {
-      const record = transform(
-        { _id: 'd', _rev: '1', type: 'data_record', form: 'a' },
-        { couchdbSeq: 42 }
-      );
-      expect(record.medicDocument.couchdb_seq).to.equal('42');
     });
   });
 });

@@ -1,9 +1,7 @@
-// Derives `subject`, `type`, and contact metadata for a CouchDB document.
-//
-// The canonical rules live in
-// ddocs/medic-db/medic/nouveau/docs_by_replication_key/index.js. Per PROJECT.md
-// the view is authoritative — if this file and the view ever disagree, the
-// view wins and this file is updated to match.
+// Derives `subject`, `type`, and contact/report/task metadata for a CouchDB
+// document. Mirrors the rules in
+// ddocs/medic-db/medic/nouveau/docs_by_replication_key/index.js — if this
+// file and the view disagree, the view wins.
 
 const HARDCODED_CONTACT_TYPES = new Set([
   'person',
@@ -22,10 +20,6 @@ const SYSTEM_DOC_IDS = new Set([
   'privacy-policies',
 ]);
 
-// `subject` sentinel for docs every authorized user can replicate.
-// Mirrors the `_all` key emitted by docs_by_replication_key/index.js plus
-// the `_design/medic-client` ddoc that webapp's filterAllowedDocIds adds
-// out-of-band — both nairobi and pg-sync need to surface that ddoc.
 const ALL_SUBJECT = '_all';
 const MEDIC_CLIENT_DDOC = '_design/medic-client';
 
@@ -39,10 +33,6 @@ const isSystemDoc = (doc) => {
   return doc.type === 'form' || doc.type === 'translations';
 };
 
-// True for the union of docs the view's "if (system doc) { key=_all }"
-// branch matches, plus _design/medic-client. The transform stamps
-// `subject = ALL_SUBJECT` for these so the pg-sync query can `OR md.subject
-// = '_all'` and return them to every user.
 const isGlobalDoc = (doc) => {
   if (!doc) {
     return false;
@@ -93,7 +83,6 @@ const getParentId = (doc) => {
   return doc.parent._id || null;
 };
 
-// Mirrors the view's getSubject() for `data_record` (report) docs.
 const getDataRecordSubject = (doc) => {
   if (doc.form && doc.contact && Array.isArray(doc.errors) && doc.errors.length) {
     for (const err of doc.errors) {
@@ -137,11 +126,6 @@ const getSubject = (doc) => {
   if (isContactDoc(doc)) {
     return doc._id || null;
   }
-  // user-settings docs are per-user. The id `org.couchdb.user:<name>` is
-  // both the natural subject and the value the pg-sync query passes as $3
-  // (the calling user's userSettingsId). Nairobi gets this doc via its
-  // hardcoded `getUserSettingsId(userCtx.name)` shortcut; we mirror that
-  // here so the query matches without a special case.
   if (doc.type === 'user-settings') {
     return doc._id || null;
   }
@@ -149,9 +133,6 @@ const getSubject = (doc) => {
     case 'data_record':
       return getDataRecordSubject(doc) || '_unassigned';
     case 'task':
-    // The view keys tasks by `doc.user` (the user's `_users` doc id).
-    // PROJECT.md's PoC auth model authorizes by the owning contact UUID
-    // (`doc.owner`), so fall back to that when `user` is absent.
       return doc.user || doc.owner || null;
     case 'target':
       return doc.owner || null;
@@ -161,25 +142,19 @@ const getSubject = (doc) => {
 };
 
 // Pure transform: CouchDB doc → records ready for write().
-// Returns { medicDocument, contact? } or null when the doc lacks _id/_rev.
-// For soft-deleted docs (`_deleted: true`), the medicDocument carries the
-// tombstone JSON body with subject/type null and deleted=true.
-const transform = (doc, options) => {
+// Returns { document, contact?, report?, task? } or null when the doc lacks
+// _id (or _rev for non-deleted docs).
+const transform = (doc) => {
   if (!doc || typeof doc !== 'object' || !doc._id) {
     return null;
   }
 
-  const couchdbSeq = (options && options.couchdbSeq !== undefined && options.couchdbSeq !== null)
-    ? String(options.couchdbSeq)
-    : null;
-
   if (doc._deleted) {
     const rev = doc._rev || '0';
     return {
-      medicDocument: {
+      document: {
         _id: doc._id,
         _rev: rev,
-        couchdb_seq: couchdbSeq,
         doc: { _id: doc._id, _rev: rev, _deleted: true },
         subject: null,
         type: null,
@@ -193,10 +168,9 @@ const transform = (doc, options) => {
   }
 
   const record = {
-    medicDocument: {
+    document: {
       _id: doc._id,
       _rev: doc._rev,
-      couchdb_seq: couchdbSeq,
       doc,
       subject: getSubject(doc),
       type: getDocType(doc),
@@ -214,6 +188,25 @@ const transform = (doc, options) => {
       muted: doc.muted ? new Date(doc.muted) : null,
       phone: typeof doc.phone === 'string' ? doc.phone : null,
       shortcode: typeof doc.shortcode === 'string' ? doc.shortcode : null,
+    };
+  }
+
+  if (doc.type === 'data_record') {
+    record.report = {
+      id: doc._id,
+      subject: getDataRecordSubject(doc),
+      contact: (doc.contact && doc.contact._id) || null,
+      form: typeof doc.form === 'string' ? doc.form : null,
+      reported_date: typeof doc.reported_date === 'number' ? doc.reported_date : null,
+    };
+  }
+
+  if (doc.type === 'task') {
+    record.task = {
+      id: doc._id,
+      owner: typeof doc.owner === 'string' ? doc.owner : null,
+      requester: typeof doc.requester === 'string' ? doc.requester : null,
+      state: typeof doc.state === 'string' ? doc.state : null,
     };
   }
 

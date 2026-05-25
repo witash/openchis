@@ -24,20 +24,6 @@ AI agents should query these MCP servers for detailed project information:
 
 ---
 
-## Assigning tasks to other agents
-
-Larger pieces of work can be decomposed into per-task assignments executed in their own git worktrees by headless Claude Code instances. The tooling lives at `scripts/agents/`:
-
-- `setup.sh <id>` — create a worktree from an assignment.
-- `run.sh <id> [<id>...]` — launch headless agents in parallel.
-- `status.sh` / `cleanup.sh` — report state / tear down merged worktrees.
-
-Per-task assignments live in `.agents/assignments/<id>.md` (gitignored). Each is a markdown file with YAML frontmatter (`id`, `branch`, `base`, `worktree`, `done_when`) and a free-form brief.
-
-See **`scripts/agents/README.md`** for the assignment file format, the working agreement (one branch per task, no remote pushes, mock services for unit tests, commit when unit tests pass), and the Resuming-after-interruption protocol. When a feature has shared cross-task context, that lives in **`PROJECT.md`** at the repo root and is referenced from each assignment.
-
----
-
 ## Architecture Overview
 
 NGINX proxies requests to the API service, which connects to CouchDB via HAProxy. Sentinel runs as a background service processing every CouchDB document change. The Webapp uses PouchDB for offline-first sync with CouchDB.

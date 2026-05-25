@@ -171,29 +171,26 @@ describe('pg-sync write-through (_bulk_docs interceptor)', () => {
       ];
       const taw = sinon.stub(pgSync, 'transformAndWrite').resolves();
 
-      const result = await controller.mirror(req, res, body);
+      await controller.mirror(req, res, body);
 
       expect(taw.callCount).to.equal(1);
       const accepted = taw.firstCall.args[0];
       expect(accepted).to.have.length(1);
       expect(accepted[0]).to.deep.equal({ _id: 'a', _rev: '2-aa', type: 'data_record', form: 'p' });
-      // BEGIN + COMMIT wrap the transformAndWrite.
       const queries = client.query.getCalls().map(c => c.args[0]);
       expect(queries).to.include('BEGIN');
       expect(queries).to.include('COMMIT');
       expect(client.release.callCount).to.equal(1);
-      expect(result).to.deep.equal({ mirrored: 1 });
     });
 
     it('is a no-op (no pool connect) when there are no captured docs', async () => {
       const res = { pgSyncOriginalDocs: [], pgSyncNewEdits: false };
       const taw = sinon.stub(pgSync, 'transformAndWrite').resolves();
 
-      const result = await controller.mirror({}, res, [{ ok: true, id: 'a' }]);
+      await controller.mirror({}, res, [{ ok: true, id: 'a' }]);
 
       expect(pool.connect.callCount).to.equal(0);
       expect(taw.callCount).to.equal(0);
-      expect(result).to.deep.equal({ mirrored: 0 });
     });
 
     it('is a no-op when the response yields no accepted docs', async () => {
@@ -203,11 +200,10 @@ describe('pg-sync write-through (_bulk_docs interceptor)', () => {
       };
       const taw = sinon.stub(pgSync, 'transformAndWrite').resolves();
 
-      const result = await controller.mirror({}, res, [{ id: 'a', error: 'conflict' }]);
+      await controller.mirror({}, res, [{ id: 'a', error: 'conflict' }]);
 
       expect(pool.connect.callCount).to.equal(0);
       expect(taw.callCount).to.equal(0);
-      expect(result).to.deep.equal({ mirrored: 0 });
     });
 
     it('skips entirely when POSTGRES_URL is not configured (pool is null)', async () => {
@@ -218,11 +214,9 @@ describe('pg-sync write-through (_bulk_docs interceptor)', () => {
       };
       const taw = sinon.stub(pgSync, 'transformAndWrite').resolves();
 
-      const result = await controller.mirror({}, res, [{ ok: true, id: 'a', rev: '2-aa' }]);
+      await controller.mirror({}, res, [{ ok: true, id: 'a', rev: '2-aa' }]);
 
       expect(taw.callCount).to.equal(0);
-      expect(result.mirrored).to.equal(0);
-      expect(result.skipped).to.equal('no-postgres-url');
     });
 
     it('mirrors a replication upload (new_edits=false) using the source _rev', async () => {

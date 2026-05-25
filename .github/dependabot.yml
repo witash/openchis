@@ -1,0 +1,95 @@
+# To get started with Dependabot version updates, you'll need to specify which
+# package ecosystems to update and where the package manifests are located.
+# Please see the documentation for all configuration options:
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+    commit-message:
+      prefix: "chore"
+    groups:
+      wdio:
+        patterns:
+        - "@wdio/*"
+      pouchdb:
+        patterns:
+        - "pouchdb-*"
+      karma:
+        patterns:
+        - "karma*"
+    ignore:
+      - dependency-name: "@types/chai" # ESM Modules https://github.com/medic/cht-core/issues/9770
+      - dependency-name: "@types/chai-as-promised" # ESM Modules https://github.com/medic/cht-core/issues/9770
+      - dependency-name: "chai" # ESM Modules https://github.com/medic/cht-core/issues/9770
+      - dependency-name: "chai-as-promised" # ESM Modules https://github.com/medic/cht-core/issues/9770
+      - dependency-name: "chai-exclude" # ESM Modules https://github.com/medic/cht-core/issues/9770
+      - dependency-name: "node-fetch" # ESM Modules https://github.com/medic/cht-core/issues/9770
+      - dependency-name: "url-join" # ESM Modules https://github.com/medic/cht-core/issues/9770
+      - dependency-name: "uuid" # ES2022 issue https://github.com/medic/cht-core/issues/10114
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 3
+
+  - package-ecosystem: "npm"
+    directory: "/admin"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+    commit-message:
+      prefix: "chore"
+    groups:
+      angular:
+        patterns:
+        - "angular*"
+        
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 3
+
+  - package-ecosystem: "npm"
+    directory: "/webapp"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+    commit-message:
+      prefix: "chore"
+    groups:
+      angular:
+        patterns:
+        - "@angular*"
+        - "@ngrx/*"
+        - "rxjs"
+        - "zone.js"
+        - "ngx-bootstrap"
+        - "ngx-cookie-service"
+    ignore:
+      - dependency-name: "bootstrap" # https://github.com/medic/cht-core/issues/8176
+      - dependency-name: "bootstrap-daterangepicker" # https://github.com/medic/cht-core/issues/8176
+      - dependency-name: "enketo-core" # https://github.com/medic/cht-core/issues/8755
+      - dependency-name: "jquery" # https://github.com/medic/cht-core/issues/8755
+      - dependency-name: "select2" # https://github.com/medic/cht-core/issues/8755
+      - dependency-name: "signature_pad" # https://github.com/medic/cht-core/issues/8755
+      - dependency-name: "@angular*" #https://github.com/medic/cht-core/issues/10029
+      - dependency-name: "@ngrx*" #https://github.com/medic/cht-core/issues/10029
+      - dependency-name: "ngx*" #https://github.com/medic/cht-core/issues/10029
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 3

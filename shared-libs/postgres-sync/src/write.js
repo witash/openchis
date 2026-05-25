@@ -1,17 +1,15 @@
 // Bulk insert helpers for the pg-sync mirror.
 //
-// `medic_documents` uses ON CONFLICT (_id, _rev) DO NOTHING. The PK ensures
-// that two writers racing on the same revision (eg. api interceptor and the
-// sentinel changes-feed mirror) both compute identical row contents — DO
-// NOTHING keeps whichever landed first.
+// `documents` uses ON CONFLICT (_id, _rev) DO NOTHING. The PK ensures
+// idempotency for retried writes of the same revision.
 //
-// `contacts` keeps the existing UPSERT semantics: the contact row may need to
-// be updated (eg. when the same contact reparents and lineage changes).
-// Cascading lineage updates to descendants is the caller's responsibility —
-// the sentinel mirror still owns that step.
+// `contacts`, `reports`, and `tasks` keep UPSERT semantics so later
+// revisions of the same doc replace the extracted columns.
 
-const MEDIC_DOC_COLUMNS = 7;
+const DOCUMENT_COLUMNS = 6;
 const CONTACT_COLUMNS = 9;
+const REPORT_COLUMNS = 5;
+const TASK_COLUMNS = 4;
 
 const buildPlaceholders = (rowCount, columnCount) => {
   const rows = [];
@@ -26,11 +24,11 @@ const buildPlaceholders = (rowCount, columnCount) => {
   return rows.join(', ');
 };
 
-const insertMedicDocumentsSQL = (rowCount) => `
-  INSERT INTO medic_documents
-    (_id, _rev, couchdb_seq, doc, subject, type, deleted)
+const insertDocumentsSQL = (rowCount) => `
+  INSERT INTO documents
+    (_id, _rev, doc, subject, type, deleted)
   VALUES
-    ${buildPlaceholders(rowCount, MEDIC_DOC_COLUMNS)}
+    ${buildPlaceholders(rowCount, DOCUMENT_COLUMNS)}
   ON CONFLICT (_id, _rev) DO NOTHING
 `;
 
@@ -50,8 +48,30 @@ const upsertContactsSQL = (rowCount) => `
     shortcode = EXCLUDED.shortcode
 `;
 
+const upsertReportsSQL = (rowCount) => `
+  INSERT INTO reports
+    (id, subject, contact, form, reported_date)
+  VALUES
+    ${buildPlaceholders(rowCount, REPORT_COLUMNS)}
+  ON CONFLICT (id) DO UPDATE SET
+    subject = EXCLUDED.subject,
+    contact = EXCLUDED.contact,
+    form = EXCLUDED.form,
+    reported_date = EXCLUDED.reported_date
+`;
+
+const upsertTasksSQL = (rowCount) => `
+  INSERT INTO tasks
+    (id, owner, requester, state)
+  VALUES
+    ${buildPlaceholders(rowCount, TASK_COLUMNS)}
+  ON CONFLICT (id) DO UPDATE SET
+    owner = EXCLUDED.owner,
+    requester = EXCLUDED.requester,
+    state = EXCLUDED.state
+`;
+
 // Postgres rejects U+0000 inside JSONB; strip both escaped and literal forms.
-// Built via RegExp constructor to avoid embedding a literal NUL in source.
 const NULL_BYTE_PATTERN = new RegExp('(\\\\+u0000)|' + String.fromCharCode(0), 'g');
 const sanitize = (text) => (text === undefined || text === null) ? text : text.replace(NULL_BYTE_PATTERN, '');
 
@@ -72,31 +92,26 @@ const normalizeRecords = (records) => {
   return [records];
 };
 
-// Writes a batch of records produced by `transform()` to Postgres.
-// One bulk INSERT per table, sequential (medic_documents first, then contacts).
-// The pgClient is the caller's transaction context; this function does not
-// open or close a transaction.
 const write = async (records, pgClient) => {
   const list = normalizeRecords(records);
   if (!list.length) {
     return;
   }
 
-  const medicDocs = list.map(r => r && r.medicDocument).filter(Boolean);
-  if (medicDocs.length) {
+  const documents = list.map(r => r && r.document).filter(Boolean);
+  if (documents.length) {
     const params = [];
-    for (const md of medicDocs) {
+    for (const d of documents) {
       params.push(
-        md._id,
-        md._rev,
-        md.couchdb_seq === undefined ? null : md.couchdb_seq,
-        serializeDoc(md.doc),
-        md.subject === undefined ? null : md.subject,
-        md.type === undefined ? null : md.type,
-        md.deleted === true,
+        d._id,
+        d._rev,
+        serializeDoc(d.doc),
+        d.subject === undefined ? null : d.subject,
+        d.type === undefined ? null : d.type,
+        d.deleted === true,
       );
     }
-    await pgClient.query(insertMedicDocumentsSQL(medicDocs.length), params);
+    await pgClient.query(insertDocumentsSQL(documents.length), params);
   }
 
   const contacts = list.map(r => r && r.contact).filter(Boolean);
@@ -117,13 +132,44 @@ const write = async (records, pgClient) => {
     }
     await pgClient.query(upsertContactsSQL(contacts.length), params);
   }
+
+  const reports = list.map(r => r && r.report).filter(Boolean);
+  if (reports.length) {
+    const params = [];
+    for (const r of reports) {
+      params.push(
+        r.id,
+        r.subject === undefined ? null : r.subject,
+        r.contact === undefined ? null : r.contact,
+        r.form === undefined ? null : r.form,
+        r.reported_date === undefined ? null : r.reported_date,
+      );
+    }
+    await pgClient.query(upsertReportsSQL(reports.length), params);
+  }
+
+  const tasks = list.map(r => r && r.task).filter(Boolean);
+  if (tasks.length) {
+    const params = [];
+    for (const t of tasks) {
+      params.push(
+        t.id,
+        t.owner === undefined ? null : t.owner,
+        t.requester === undefined ? null : t.requester,
+        t.state === undefined ? null : t.state,
+      );
+    }
+    await pgClient.query(upsertTasksSQL(tasks.length), params);
+  }
 };
 
 module.exports = {
   write,
   sanitize,
   _sql: {
-    insertMedicDocumentsSQL,
+    insertDocumentsSQL,
     upsertContactsSQL,
+    upsertReportsSQL,
+    upsertTasksSQL,
   },
 };
