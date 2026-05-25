@@ -3,7 +3,6 @@ import { lastValueFrom } from 'rxjs';
 import { DbService } from './db.service';
 import { HttpClient } from '@angular/common/http';
 import { RulesEngineService } from '@mm-services/rules-engine.service';
-import { PgReplicationService } from '@mm-services/pg-replication.service';
 
 @Injectable({
   providedIn: 'root'
@@ -13,20 +12,13 @@ export class ReplicationService {
     private dbService:DbService,
     private http:HttpClient,
     private rulesEngineService:RulesEngineService,
-    private pgReplicationService:PgReplicationService,
   ) {
   }
 
   private readonly BATCH_SIZE=100;
 
   async replicateFrom():Promise<{ read_docs: number }> {
-    const getIdsResponse = await this.callGetIds();
-
-    if (getIdsResponse?.use_pg_sync) {
-      return this.pgReplicationService.replicateFrom();
-    }
-
-    const remoteDocIdsRevs = getIdsResponse?.doc_ids_revs ?? [];
+    const remoteDocIdsRevs = await this.getRemoteDocs();
     const localDocs = await this.dbService.get().allDocs();
 
     const localIdRevMap = Object.assign({}, ...localDocs.rows.map(row => ({ [row.id]: row.value?.rev })));
@@ -37,12 +29,13 @@ export class ReplicationService {
     return { read_docs: nbrDeleted + nbrDownloaded };
   }
 
-  private async callGetIds():Promise<{ doc_ids_revs?: { id; rev }[]; use_pg_sync?: boolean }> {
-    const getIdsReq = this.http.get<{ doc_ids_revs?: { id; rev }[]; use_pg_sync?: boolean }>(
+  private async getRemoteDocs():Promise<{ id; rev }[]> {
+    const getIdsReq = this.http.get<{ doc_ids_revs: { id; rev }[]}>(
       '/api/v1/replication/get-ids',
       { responseType: 'json' }
     );
-    return lastValueFrom(getIdsReq);
+    const response = await lastValueFrom(getIdsReq);
+    return response.doc_ids_revs;
   }
 
   private async getMissingDocs(localIdRevMap, remoteDocIdsRevs):Promise<number> {
