@@ -1,3 +1,4 @@
+const logger = require('@medic/logger');
 const pgPool = require('./pg-pool');
 
 // Authorization (PoC): a user is authorized for a document when
@@ -36,14 +37,28 @@ const toResponseDoc = (row) => {
 };
 
 const getDocs = async (userCtx) => {
+  const t0 = Date.now();
   const placeId = resolveUserPlaceId(userCtx);
+  const userName = (userCtx && userCtx.name) || 'unknown';
   if (!placeId) {
+    logger.info(
+      `pg-sync getDocs: user=${userName} n=0 total=${Date.now() - t0}ms skipped=no-place-id`
+    );
     return { docs: [] };
   }
   const userSettingsId = userCtx && userCtx.name ? `org.couchdb.user:${userCtx.name}` : '';
+
+  const tSql = Date.now();
   const result = await pgPool.query(SELECT_SQL, [placeId, userSettingsId]);
+  const sqlMs = Date.now() - tSql;
   const rows = (result && result.rows) || [];
-  return { docs: rows.map(toResponseDoc) };
+  const docs = rows.map(toResponseDoc);
+
+  logger.info(
+    `pg-sync getDocs: user=${userName} n=${docs.length} `
+    + `sql=${sqlMs}ms total=${Date.now() - t0}ms`
+  );
+  return { docs };
 };
 
 module.exports = {

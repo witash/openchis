@@ -65,6 +65,7 @@ const capture = (req, res, next) => {
   res.pgSyncOriginalDocs = Array.isArray(body.docs) ? body.docs : [];
   res.pgSyncNewEdits = body.new_edits;
   res.pgSyncMirror = mirror;
+  res.pgSyncT0 = Date.now();
   next();
 };
 
@@ -72,25 +73,43 @@ const capture = (req, res, next) => {
 // after the CouchDB response is parsed. Throws on Postgres failure so the
 // caller can map to a 5xx response.
 const mirror = async (req, res, body) => {
+  const tMirrorStart = Date.now();
+  const couchMs = res.pgSyncT0 ? tMirrorStart - res.pgSyncT0 : 0;
   const originalDocs = res.pgSyncOriginalDocs || [];
   if (!originalDocs.length) {
     return;
   }
   const accepted = acceptedDocsFromResponse(originalDocs, body, res.pgSyncNewEdits);
   if (!accepted.length) {
+    logger.info(`pg-sync bulk-docs: n=0 couch=${couchMs}ms (no accepted docs)`);
     return;
   }
 
   const pool = pgPool.getPool();
   if (!pool) {
+    logger.info(`pg-sync bulk-docs: n=${accepted.length} couch=${couchMs}ms skipped=no-postgres-url`);
     return;
   }
 
+  const profile = { n: accepted.length, transform_ms: 0, lineage_ms: 0, write_ms: 0 };
+  const tConnect = Date.now();
   const client = await pool.connect();
+  const connectMs = Date.now() - tConnect;
   try {
+    const tBegin = Date.now();
     await client.query('BEGIN');
-    await pgSync.transformAndWrite(accepted, client);
+    const beginMs = Date.now() - tBegin;
+    await pgSync.transformAndWrite(accepted, client, profile);
+    const tCommit = Date.now();
     await client.query('COMMIT');
+    const commitMs = Date.now() - tCommit;
+    const totalMs = Date.now() - (res.pgSyncT0 || tMirrorStart);
+    logger.info(
+      `pg-sync bulk-docs: n=${profile.n} couch=${couchMs}ms `
+      + `connect=${connectMs}ms begin=${beginMs}ms `
+      + `transform=${profile.transform_ms}ms lineage=${profile.lineage_ms}ms `
+      + `write=${profile.write_ms}ms commit=${commitMs}ms total=${totalMs}ms`
+    );
   } catch (err) {
     try {
       await client.query('ROLLBACK');

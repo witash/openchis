@@ -41,10 +41,14 @@ const stampLineages = async (records, pgClient) => {
   }
 };
 
-const transformAndWrite = async (docs, pgClient) => {
+// `profile`, if passed, is filled in with millisecond timings for the three
+// sub-phases (`transform_ms`, `lineage_ms`, `write_ms`) plus the record count
+// (`n`). Callers can log the breakdown to diagnose slow _bulk_docs.
+const transformAndWrite = async (docs, pgClient, profile) => {
   if (!docs || !docs.length) {
     return;
   }
+  const tTransform = Date.now();
   const records = [];
   for (const doc of docs) {
     const record = transform(doc);
@@ -52,11 +56,23 @@ const transformAndWrite = async (docs, pgClient) => {
       records.push(record);
     }
   }
+  if (profile) {
+    profile.transform_ms = Date.now() - tTransform;
+    profile.n = records.length;
+  }
   if (!records.length) {
     return;
   }
+  const tLineage = Date.now();
   await stampLineages(records, pgClient);
+  if (profile) {
+    profile.lineage_ms = Date.now() - tLineage;
+  }
+  const tWrite = Date.now();
   await write(records, pgClient);
+  if (profile) {
+    profile.write_ms = Date.now() - tWrite;
+  }
 };
 
 module.exports = {
