@@ -117,9 +117,14 @@ module.exports = {
       return res.json(error);
     }
 
+    const tAuthz = Date.now();
     return bulkDocs
       .filterOfflineRequest(req.userCtx, req.body.docs)
       .then(filteredDocs => {
+        // pg-sync profiling: time spent authorizing/filtering this offline
+        // user's docs. Reported by the bulk-docs mirror alongside the CouchDB
+        // write time. Online users skip this path, so the field stays unset.
+        res.pgSyncAuthzMs = Date.now() - tAuthz;
         // results received from CouchDB need to be ordered to maintain same sequence as original `docs` parameter
         // and forbidden docs stubs must be added
         res.interceptResponse = _.partial(interceptResponse, req.body.docs);

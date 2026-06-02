@@ -75,19 +75,24 @@ const capture = (req, res, next) => {
 const mirror = async (req, res, body) => {
   const tMirrorStart = Date.now();
   const couchMs = res.pgSyncT0 ? tMirrorStart - res.pgSyncT0 : 0;
+  // Offline-user authorization cost (filterOfflineRequest), measured in the
+  // bulk-docs controller. Unset for online users, who skip that path.
+  const authzLabel = res.pgSyncAuthzMs === undefined ? '?' : res.pgSyncAuthzMs;
   const originalDocs = res.pgSyncOriginalDocs || [];
   if (!originalDocs.length) {
     return;
   }
   const accepted = acceptedDocsFromResponse(originalDocs, body, res.pgSyncNewEdits);
   if (!accepted.length) {
-    logger.info(`pg-sync bulk-docs: n=0 couch=${couchMs}ms (no accepted docs)`);
+    logger.info(`pg-sync bulk-docs: n=0 authz=${authzLabel}ms couch=${couchMs}ms (no accepted docs)`);
     return;
   }
 
   const pool = pgPool.getPool();
   if (!pool) {
-    logger.info(`pg-sync bulk-docs: n=${accepted.length} couch=${couchMs}ms skipped=no-postgres-url`);
+    logger.info(
+      `pg-sync bulk-docs: n=${accepted.length} authz=${authzLabel}ms couch=${couchMs}ms skipped=no-postgres-url`
+    );
     return;
   }
 
@@ -105,7 +110,7 @@ const mirror = async (req, res, body) => {
     const commitMs = Date.now() - tCommit;
     const totalMs = Date.now() - (res.pgSyncT0 || tMirrorStart);
     logger.info(
-      `pg-sync bulk-docs: n=${profile.n} couch=${couchMs}ms `
+      `pg-sync bulk-docs: n=${profile.n} authz=${authzLabel}ms couch=${couchMs}ms `
       + `connect=${connectMs}ms begin=${beginMs}ms `
       + `transform=${profile.transform_ms}ms lineage=${profile.lineage_ms}ms `
       + `write=${profile.write_ms}ms commit=${commitMs}ms total=${totalMs}ms`
