@@ -47,6 +47,9 @@ logger.info('Running server checks...');
     const schedule = require('./src/schedule');
     schedule.init();
 
+    const postgresSync = require('./src/lib/postgres-sync');
+    postgresSync.init();
+
     logger.info('startup complete.');
 
     const processHooks = require('./src/process-hooks');
