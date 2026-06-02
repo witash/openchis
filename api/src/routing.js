@@ -942,6 +942,15 @@ app.post(
   authorization.onlineUserPassThrough,
   pgSync.getDocs,
 );
+// Direct Postgres write, bypassing CouchDB entirely. No onlineUserPassThrough:
+// this runs for any authenticated user (the perf harness), never proxies to
+// CouchDB.
+app.post(
+  '/api/v1/pg-sync/write',
+  jsonParser,
+  authorization.handleAuthErrors,
+  pgSync.writeDocs,
+);
 
 const metaRoutePrefix = `/${environment.db}-user-*"name"-meta/`;
 
