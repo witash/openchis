@@ -23,6 +23,18 @@ const pullForProtocol = ({ protocol, local, baseUrl, user, fetchFn }) => {
   throw new Error(`unknown protocol: ${protocol}`);
 };
 
+// nairobi pushes up to CouchDB via PouchDB replicate.to; pg-sync writes
+// straight to Postgres through /api/v1/pg-sync/write, bypassing CouchDB.
+const pushForProtocol = ({ protocol, local, remote, baseUrl, user, fetchFn }) => {
+  if (protocol === 'pg-sync') {
+    return pgSync.push({ local, baseUrl, user, fetchFn });
+  }
+  if (protocol === 'nairobi') {
+    return push.push({ local, remote });
+  }
+  throw new Error(`unknown protocol: ${protocol}`);
+};
+
 // One full webapp-style sync: replicateTo (push) then replicateFrom (pull).
 // We capture each direction's error separately so a push failure doesn't
 // hide a pull number (and vice versa) — matches webapp's behaviour of
@@ -35,7 +47,9 @@ const runSync = async ({ protocol, local, remote, baseUrl, user, fetchFn }) => {
   let pullErr = null;
 
   try {
-    pushOut = await push.push({ local, remote });
+    pushOut = await pushForProtocol({
+      protocol, local, remote, baseUrl, user, fetchFn,
+    });
   } catch (err) {
     pushErr = err;
   }
@@ -73,7 +87,9 @@ const runClient = async (opts) => {
     PouchDB,
     fetchFn,
     sendMessage,
-    spec, // { id, username, password, scenario, protocol, syncs: [{ kind }], pendingUploads?, runId?, userIdx?, contactId? }
+    // { id, username, password, scenario, protocol, syncs: [{ kind }],
+    //   pendingUploads?, runId?, userIdx?, contactId? }
+    spec,
     baseUrl,
     seedFn,
   } = opts;
@@ -150,7 +166,7 @@ const runClient = async (opts) => {
   } finally {
     try {
       await local.destroy();
-    } catch (_destroyErr) { /* best effort */ }
+    } catch { /* best effort */ }
   }
   sendMessage({ type: 'done', user_id: spec.id });
   return results;
@@ -160,6 +176,7 @@ module.exports = {
   buildLocalPouch,
   formatError,
   pullForProtocol,
+  pushForProtocol,
   runClient,
   runSync,
 };

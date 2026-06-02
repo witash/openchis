@@ -1,15 +1,18 @@
 'use strict';
 
 // Initial-vs-ongoing scenario: N users, each running TWO consecutive syncs.
-// The first sync uses `since=0` (pg-sync) or initial get-ids (nairobi); the
-// second sync reads the cursor that sync #1 wrote and asks for the delta.
-// With no new docs written between the two calls, the second response
-// should be effectively empty — that proves the cursor round-trip works
-// and the second sync should be visibly faster.
+//
+// nairobi is cursor-based: sync #1 does the initial get-ids, sync #2 asks for
+// the delta and should be visibly faster. pg-sync on this branch is
+// full-snapshot — /api/v1/pg-sync has no server cursor, so the second pull
+// re-pulls the whole authorized set (ongoing_docs ~= initial_docs). The push
+// side still differs between the two syncs: the seeded pending uploads go up
+// on sync #1, and sync #2 has nothing new to push (ongoing_pushed = 0) because
+// the push checkpoint advances past the docs pulled in sync #1.
 //
 // `runClient` in lib/client.js shares one PouchDB across the entries in
-// `spec.syncs`, so the `_local/medic-pg-sync-state` doc (for pg-sync) and
-// the populated allDocs (for nairobi) both persist between iterations.
+// `spec.syncs`, so the populated allDocs (nairobi) and the push checkpoint
+// (`local.__pgPushSince`, pg-sync) both persist between iterations.
 
 const runner = require('../lib/runner');
 const setup = require('../lib/setup');
